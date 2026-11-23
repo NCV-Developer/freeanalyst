@@ -1,0 +1,927 @@
+"""按**内容**把三张表组装起来 —— 不看页码，不靠标题。
+
+## 为什么换掉「页码定位」（实测：12 家公司里 8 家失败）
+
+原来靠「标题在哪个页 + 往后取几页」。这条路走了三次补丁，每次修好一份、
+弄坏另一份：
+
+1. 按标题找 → 扫描件标题被 OCR 认烂时失手
+   （某上市公司母公司资产负债表被认成「股名數公司燕苎鎮债表」，一个字都不对）
+2. 改用目录 → 年报的目录格式又不一样
+3. 加「编制单位」当起始标志 → 某矿业公司 B直接从 (38,117) 开始
+
+**根因**：位置和标题根本不足以确定「哪几页是这张表」。同一份材料里：
+
+    某矿业公司 377 页      合并资产负债表 的标题出现在 4 / 108 / 110 / 117 / 118 五处
+    某矿业公司 B 252 页      标题在 123，跑到 150 页之后全是财报附注
+    某铜业公司 249 页      标题在 90
+
+年报的财报附注有 200+ 页，表格密度远超正表，任何「按数值多少挑」的启发式
+都会被附注带偏。
+
+## 换成的做法
+
+**让每一页自己说它属于哪张表。** 看这一页出现了哪些**标志性科目**：
+
+    同时出现「资产总计」「负债合计」  → 这是资产负债表
+    同时出现「营业收入」「净利润」    → 这是利润表
+    同时出现「经营活动」「投资活动」  → 这是现金流量表
+
+标志是按**组合**用的，不是单个词 —— 「净利润」单看会命中到处都在的附注，
+但「营业收入 + 营业利润 + 净利润」同时出现在一页上，基本只可能是利润表本体。
+
+然后把标签相同的**连续页**归成一张表。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from ingest import pdf as ip
+
+#: 每类报表的**标志组合**。
+#: 外层元组是「必须至少命中一个」的组，组数越多分越高。
+_MARKERS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "balance": (
+        ("资产总计", "資產總額", "负债合计", "負債總額", "所有者权益合计",
+         "權益總額", "负债和所有者权益总计", "资产净额", "資產淨額"),
+        ("流动资产合计", "非流动资产合计", "流动负债合计", "非流动负债合计",
+         "流動資產淨額", "總資產減流動負債"),
+        ("货币资金", "应收账款", "存货", "固定资产", "应付账款", "短期借款",
+         "現金及銀行結餘", "貿易應收款項", "存貨", "物業、廠房及設備"),
+    ),
+    "income": (
+        ("营业收入", "营业总收入", "产品销售收入", "营业收入合计",
+         "营业额", "營業額", "收入", "收益"),
+        ("营业利润", "利润总额", "净利润", "除税前溢利", "年度溢利",
+         "本年度溢利", "淨利潤", "利潤總額", "年內溢利", "除稅前溢利"),
+        ("营业成本", "税金及附加", "销售费用", "管理费用", "财务费用",
+         "銷售成本", "行政開支", "融資成本", "銷售及分銷成本"),
+    ),
+    "cash_flow": (
+        # **必须三条「净额」行同时出现。**
+        # 原来只要求「经营活动」+「投资/筹资」两类词，太松：
+        # 现金流量表在 MD&A 和附注里到处被提到，实测某白酒公司被判到第 115 页
+        # （财报附注），真表在第 64 页。
+        # 附注的「现金流量表补充资料」只讲经营活动那条调节，
+        # **不会同时出现投资和筹资的净额行** —— 这是可靠的区分点。
+        ("经营活动产生的现金流量净额", "经营活动现金流量净额", "经营活动所用现金净额",
+         "經營活動所得現金淨額", "經營活動所用現金淨額", "經營活動產生的現金流量淨額"),
+        ("投资活动产生的现金流量净额", "投资活动现金流量净额", "投资活动所用的现金净额",
+         "投資活動所得現金淨額", "投資活動所用現金淨額", "投資活動產生的現金流量淨額"),
+        ("筹资活动产生的现金流量净额", "筹资活动现金流量净额", "融资活动所用的现金净额",
+         "融資活動所得現金淨額", "融資活動所用現金淨額", "籌資活動產生的現金流量淨額"),
+        # **必须有期初/期末现金那条滚存。**
+        # 前面几页的「主要会计数据」「财务报表附注目录」会罗列三张表的名字，
+        # 但没有这条滚存 —— 实测不加这一组时，某白酒公司被判到第 10 页、
+        # 某 A 股广告公司到第 19 页、某矿业公司 B到第 38 页（全是概览页）。
+        ("期初现金及现金等价物余额", "年初现金及现金等价物", "年初的现金及现金等价物",
+         "於年初之現金及現金等價物", "年初之現金及現金等價物"),
+        ("期末现金及现金等价物余额", "年末现金及现金等价物", "年末的现金及现金等价物",
+         "於年末之現金及現金等價物", "年末之現金及現金等價物"),
+    ),
+}
+
+
+#: **英文（IFRS / 港交所英文版 / 纯英文年报）** 的标志组合 —— 与 `_MARKERS` 同构。
+#:
+#: ## 为什么是**另开一张表**，而不是往 `_MARKERS` 里添词（实测踩到）
+#:
+#: 一份 379 页的**纯英文年报**（中国再保险 2024，港交所披露）**三张表一行都没定位到**：
+#: 逐页打分，389 / 379 页的三类分**全是 0** —— 词表全是简体中文，
+#: 英文页一个字都命中不了。真表其实就在：
+#:
+#:     利润表        P153  Consolidated Statement of Profit or Loss
+#:     资产负债表    P155–157（P155 资产 / P156 负债 / P157 权益合计）
+#:     现金流量表    P160–161
+#:
+#: **但不能把英文词直接塞进 `_MARKERS` 的组里**：分是「命中组数 × 100」，
+#: 塞进去**组数就变了**，中文材料的分也跟着漂 —— 等于拿那七份已测材料的定位去赌。
+#: 所以英文单算一套，最后**两类取大者**（见 `signature`）：
+#: 纯中文材料英文词一条都不命中，分数**一分不动**；英文材料才拿得到分。
+#:
+#: 组的设计和中文侧一一对应：三组「标志 + 明细 + 更细」，光命中一组不给分
+#: （`_group_score` 里 `g_hit >= 2`），现金流量表同样要求**三条活动净额 + 期初/期末滚存**。
+_MARKERS_EN: dict[str, tuple[tuple[str, ...], ...]] = {
+    "balance": (
+        ("total assets", "total liabilities", "total equity", "net assets",
+         "total liabilities and equity"),
+        ("current assets", "non-current assets", "current liabilities",
+         "non-current liabilities", "net current assets",
+         "total assets less current liabilities",
+         "total equity attributable to equity shareholders"),
+        ("cash and cash equivalents", "cash and bank balances",
+         "trade receivables", "inventories", "property, plant and equipment",
+         "loans and advances", "insurance contract liabilities",
+         "insurance contract assets", "reinsurance contract assets",
+         "financial investments", "notes and bonds payable", "share capital",
+         "retained earnings"),
+    ),
+    "income": (
+        ("operating income", "insurance revenue", "total income", "revenue",
+         "total revenue", "turnover", "interest income", "investment income"),
+        ("profit before tax", "profit before taxation", "net profit",
+         "profit for the year", "profit for the period", "loss for the year",
+         "operating profit", "profit from operations"),
+        ("insurance service expenses", "operating expenses",
+         "administrative expenses", "cost of sales", "finance costs",
+         "income tax"),
+    ),
+    "cash_flow": (
+        ("net cash flows generated from operating activities",
+         "net cash flows used in operating activities",
+         "net cash generated from operating activities",
+         "net cash used in operating activities",
+         "net cash flows from operating activities",
+         "net cash provided by operating activities"),
+        ("net cash flows used in investing activities",
+         "net cash flows generated from investing activities",
+         "net cash used in investing activities",
+         "net cash flows from investing activities",
+         "net cash provided by investing activities"),
+        ("net cash flows generated from financing activities",
+         "net cash flows used in financing activities",
+         "net cash used in financing activities",
+         "net cash flows from financing activities",
+         "net cash provided by financing activities"),
+        ("cash and cash equivalents at the beginning of the year",
+         "cash and cash equivalents at beginning of year",
+         "cash and cash equivalents at the beginning of the period",
+         "cash and cash equivalents at beginning of period"),
+        ("cash and cash equivalents at the end of the year",
+         "cash and cash equivalents at end of year",
+         "cash and cash equivalents at the end of the period",
+         "cash and cash equivalents at end of period"),
+    ),
+}
+
+
+#: **必备明细行** —— 命中不足就把这一类的分归零。
+#:
+#: ## 为什么（实测踩到，四家上市年报全栽在这里）
+#:
+#: 加了「现金滚存」之后，某白酒公司仍被判到第 10 页、某科创板公司到 33、某铜业公司到 15。
+#: 看那几页才发现是**「主要会计数据 / 关键财务指标」概览表** ——
+#: 一张表里**混着三张表的行**：
+#:
+#:     营业收入 | 营业成本 | 销售费用 | 管理费用 | 财务费用 | 研发费用
+#:     经营活动产生的现金流量净额 | 投资活动产生的现金流量净额 | 筹资活动产生的现金流量净额
+#:
+#: 所以它**是**一张表（我加的行数门槛拦不住），三条净额行也一条不少，
+#: 词面上比真表还全。
+#:
+#: 区分点在**明细行**：真表现金流量表有 30–60 行全是现金流量科目的明细
+#: （销售商品收到的现金 / 支付给职工的现金 / 购建固定资产支付的现金…），
+#: **概览表这些一行都没有**。
+#: 每命中一条「明细行」，这一页的该类得分加多少。
+#:
+#: 一个组命中 = 100 分，所以 4 条明细行 ≈ 一个整组 —— 分量够，但不会让
+#: 「明细行多」这件事压过「标志组合全」这件事。
+_SUBSIDIARY_WEIGHT = 25
+
+#: 标题里明写「母公司 XX 表」的 —— 这些是母公司报表，不是我们要的合并表。
+#: 母公司表的标题**往往只写「利润表」**，所以这条判据抓不全；
+#: 但它抓到的那部分**扣分是安全的**（见 `signature` 里的说明）。
+_PARENT_TITLE = re.compile(r"母公司\s*(资产负债表|利润表|现金流量表|损益表)")
+#: 扣多少。要够大才能压过「母公司表行数更多、得分更高」的情况
+#: （实测差 50 分：431 vs 381）。
+_PARENT_PENALTY = 60
+
+#: 附注里的「分部报告」页会被误当成利润表 —— 同样**只扣分**。
+#:
+#: ## 为什么是扣分不是加分（沿用上面那条实测量化的理由）
+#: 扣分只会**降**可疑页；加分会把"引用数字的概览页"抬上来。
+#:
+#: ## 实测（一份 176 页的保险公司中期报告）
+#: 选中了附注里的**分部报告**页（434 分），而真的合并利润表只有 383 分 —— 差 51 分。
+#: 分部报告表里恰好有更多能命中的科目词（保险服务收入、营业收入合计…），
+#: 而真表页的科目（保险服务收入 / 赔付支出 / 承保财务损益）**不在词表里**。
+#: 被误选的那两页页首写的是「四、分部报告（续）」—— **页首这几个字是最硬的区分点**。
+_SEGMENT_TITLE = re.compile(r"分部报告|分部間|分部利润|分部分析|分部資料"
+                            r"|segment information|segment results", re.IGNORECASE)
+_SEGMENT_PENALTY = 80
+#: 只在页首这个长度内找"分部"字样：**页首出现才是这张表本身**，
+#: 正文里顺带提一句「分部」不该被扣分（不然会误伤真表）。
+_SEGMENT_HEAD = 200
+
+
+#: 「管理层讨论与分析」里的**变动分析表**（有「解释列」的那种）—— 同样**只扣分**。
+#:
+#: ## 实测（某券商公司 2024 年报，389 页，公开披露）
+#:
+#: 资产负债表被定到 **P40（278 分）**，而那一页是 MD&A 的**资产结构变动分析表**：
+#: 表头是「项目名称 | 本期期末数 | 上期期末数 | 占总资产比例 | 较上期期末变动比例 |
+#: **情况说明**」，行是**散文**（`代理承销证券款 不适用 未结算代理承销款减少`）——
+#: 没有解释列以外的任何表结构。真表（「某券商公司股份有限公司 合并资产负债表」，
+#: 带「本集团 / 附注五 / 金额单位均为人民币元」）在 **P176–177，277 分**，
+#: **只差 1 分**。同一份材料的利润表也被定在 P37（380 分，同样是变动分析表：
+#: 「科目 | 本期数 | 上年同期数 | 变动比例 | **主要变动原因**」），
+#: 真表「合并利润表」在 P182（304 分）。
+#:
+#: ## 判据：**页首出现「解释列」的表头**
+#:
+#: 真报表**没有解释列** —— 表头里不该有「情况说明 / 变动原因 / 变动比例」这类词。
+#: 这些词正是 MD&A 变动分析表的**栏名**，而且只出现在页首那一行表头里。
+#: 只扣分、不加分（理由同 `_SEGMENT_TITLE`）：扣分只会把可疑页压下去，
+#: 不会把「引用数字的概览页」抬上来。
+#:
+#: ⚠️ 这条**不是**「按页首表题锁锚点」那条老路（那条修好中信、误伤平安，
+#: 三条变体都分不开，已回退，见 `_title_pages`）—— 这里**不设任何允许页集合**，
+#: 只对命中「解释列表头」的页减分。
+#:
+#: ## 实测补充：英文年报里同一类错（中国再保险 2024，379 页）
+#: 利润表被定到 **P25（436 分）** —— 那是「**管理层讨论与分析 · 财务分析**」里的
+#: 分部关键数据表（页首 `MANAGEMENT DISCUSSION AND ANALYSIS / Financial Analysis
+#: / … Change (%)`），行名列的也是同一批科目名（保险收入 / 利息收入 / … / 净利润）；
+#: 真表 P153（`CONSOLIDATED STATEMENT OF PROFIT OR LOSS`，412 分）。
+#: 所以把**英文的 MD&A 页首标志**也并进来（`change (%)` 是这类表的**变动率列名**）。
+_MDA_CHANGE_TITLE = re.compile(
+    "情况说明|变动原因|变动比例|变动情况|主要原因"
+    "|management discussion and analysis|change \\(%\\)", re.IGNORECASE)
+_MDA_CHANGE_PENALTY = 100
+#: 只看页首 —— 「解释列」是表头的一部分（实测两处都在页首 90 字内）。
+_MDA_HEAD = 300
+
+
+_REQUIRED: dict[str, tuple[str, tuple[str, ...], int]] = {
+    "cash_flow": (
+        "明细行",
+        ("销售商品、提供劳务收到的现金", "收到的税费返还",
+         "购买商品、接受劳务支付的现金", "支付给职工以及为职工支付的现金",
+         "支付的各项税费", "收回投资收到的现金", "取得投资收益收到的现金",
+         "购建固定资产", "取得借款收到的现金", "偿还债务支付的现金",
+         "分配股利、利润或偿付利息支付的现金", "收到的其他与经营活动有关的现金",
+         "Cash generated from operations", "Cash received from customers",
+         "Payments to suppliers", "Payments to employees",
+         # 英文年报（IFRS）的常见写法 —— 与上面四条同义，实测中国再保险年报用
+         # `Cash generated from operations` / `Income tax paid` /
+         # `Interest received` / `Purchases of property and equipment...`。
+         "Income tax paid", "Interest received", "Dividends received",
+         "Purchases of investments", "Proceeds from disposal of investments"),
+        3,
+    ),
+    "balance": (
+        "明细行",
+        ("货币资金", "应收账款", "存货", "固定资产", "应付账款", "短期借款",
+         "预付款项", "其他应收款", "应付职工薪酬", "应交税费",
+         # 英文侧同义写法（实测中国再保险年报：资产「Cash and short-term time
+         # deposits / Financial investments / Insurance contract assets」、
+         # 负债「Insurance contract liabilities / Notes and bonds payable」）
+         "Cash and cash equivalents", "Cash and bank balances",
+         "Trade receivables", "Inventories", "Property, plant and equipment",
+         "Loans and advances", "Insurance contract liabilities",
+         "Insurance contract assets", "Financial investments"),
+        3,
+    ),
+    "income": (
+        "明细行",
+        ("营业成本", "税金及附加", "销售费用", "管理费用", "研发费用",
+         "财务费用", "资产减值损失", "信用减值损失", "其他收益",
+         "Cost of Sales", "Gross Profit", "Operating Expenses",
+         # 英文侧（保险公司报表：收入段与费用段的标志行）
+         "Insurance revenue", "Insurance service expenses",
+         "Administrative expenses", "Finance costs", "Interest income"),
+        2,
+    ),
+}
+
+
+@dataclass
+class PageScore:
+    number: int
+    scores: dict[str, int] = field(default_factory=dict)
+    #: 这一页里**已经开始了**哪些表（只看「一页多表」的情况）。
+    #: `{"balance": True}` = 这一页的下半部分已经是利润表/现金流量表的开头了 ✗
+    #: —— 上一张表必须在这一页**之前**结束。
+    starts_next: dict[str, bool] = field(default_factory=dict)
+
+    @property
+    def best(self) -> str | None:
+        if not self.scores:
+            return None
+        k = max(self.scores, key=lambda x: self.scores[x])
+        return k if self.scores[k] > 0 else None
+
+
+def _page_rows(pg) -> list[list[str]]:
+    """这一页抽出来的表行（和 `from_pdf._fill` 用**同一套**抽取）。
+
+    ⚠️ 必须是同一个函数：打分和取值若用两套抽取，
+    就会出现「按 A 打分选中了这页、按 B 取值取不到东西」这种自相矛盾。
+    """
+    from .from_pdf import page_rows
+
+    return page_rows(pg)
+
+
+def _row_count(pg) -> int:
+    """这一页有多少「科目名 + 数字」的行 —— 真表才有的东西。"""
+    n = 0
+    for r in _page_rows(pg):
+        if len(r) > 2 and str(r[2]).strip() and str(r[0]).strip():
+            n += 1
+    return n
+
+
+def _has(text: str, low: str, key: str) -> bool:
+    """这个标志词在不在这一页里。
+
+    **英文词按小写比对**（`low` 是整页文本的小写副本）。实测英文年报里同一个词
+    有好几种大小写写法：中国再保险用句首大写（`Total assets` / `Net cash flows
+    generated from operating activities`），词表若写死一种就漏。
+    中文词的比对**一字未改**（中文没有大小写，`lower()` 是恒等）。
+    """
+    return key.lower() in low if key.isascii() else key in text
+
+
+def _group_score(text: str, groups: tuple[tuple[str, ...], ...]) -> int:
+    """命中的**组数** × 100 + 命中的**科目数**。组数不足 2 不给分。
+
+    （原来这段写死在 `signature` 里；英文词表要单独算一套，才拆出来。）
+    """
+    g_hit = 0
+    n_hit = 0
+    for g in groups:
+        hits = sum(1 for m in g if m in text)
+        if hits:
+            g_hit += 1
+            n_hit += hits
+    return g_hit * 100 + n_hit if g_hit >= 2 else 0
+
+
+def signature(text: str, rows: int = 0) -> dict[str, int]:
+    """这一页对每类报表的「证据分」。
+
+    分 = 命中的**组数** × 100 + 命中的**科目数**。
+
+    ## ⚠️ 繁体要先转简体（实测踩到）
+
+    某 H 股综合企业（00656.HK）的年报是繁体：`綜合損益表` / `總收入` / `人民幣千元`。
+    标志词表全是简体，于是一份 330 页的年报**三张表全判不出来**，整份归零。
+    这里统一走一遍繁转简再匹配 —— 和 `canonical.py` 用同一个转换。
+
+    ## ⚠️ 必须有表格行，光有词不算（实测踩到）
+
+    第一版只看词，结果**某白酒公司被判到第 10 页、某科创板公司到 33、某铜业公司到 15**
+    —— 那几页全是**管理层讨论与分析（MD&A）**。年报正文里专门有一段在
+    「讨论」现金流量表的三个数，所以三条净额行一条不少，词面上比真表还全。
+
+    **区分点不是词，是有没有「真表才有的明细行」**（见 `_REQUIRED`）。
+
+    ## ⚠️ 中文词表与英文词表**各算一套，取大者**（实测踩到）
+
+    纯英文年报（中国再保险 2024）用中文词表**每页都是 0 分** —— 三张表一行都定位不到。
+    但把英文词并进中文词表会**改动组数**，而分 = 组数 × 100，中文材料的分就跟着漂。
+    所以两张表各算一次，**取大者**：不含英文词的页，中文那套的分一分不动。
+    """
+    if text:
+        from . import canonical as cn
+        text = cn._to_simplified(text)
+    # 行数太少 → 不是正表，直接 0 分。
+    #
+    # ⚠️ **门槛要低。** 试过提到 5，结果某矿业公司（377 页）和某 H 股综合企业（330 页）
+    # 的正表页也被判成 0 分 —— 那两份的表抽取本来就吃不干净，
+    # 行数少不等于不是正表。真正的过滤器是下面的 `_REQUIRED` 明细行。
+    if rows < 2:
+        return {k: 0 for k in _MARKERS}
+
+    out: dict[str, int] = {}
+    low = text.lower()          # 只给英文词表用（中文页里英文词一条也不命中）
+    for kind, groups in _MARKERS.items():
+        # 中文/繁体一套，英文一套 —— **取大者**（原因见上面第三段）。
+        score = max(_group_score(text, groups),
+                    _group_score(low, _MARKERS_EN[kind]))
+        if not score:
+            out[kind] = 0
+            continue
+
+        # **给「母公司 XX 表」扣分 —— 只扣分，不给合并表加分。**
+        #
+        # ## 为什么只扣分（实测量化过）
+        #
+        # 某招股说明书里合并表和母公司表都在，标题都可能是「资产负债表」。
+        # 实测它的母公司资产负债表得 431 分、合并的只得 381 分 ——
+        # 母公司表赢了（**口径错了，任何勾稽都抓不住**）。
+        # 那一页的标题里**有「母公司」字样**，扣 60 分后降到 371 < 381 ✓。
+        #
+        # ## 为什么不能反过来给合并表加分
+        #
+        # 合并表的标志是「归属于母公司 / 少数股东权益」，但**管理层讨论与
+        # 分析的概览表里也有**这些词。实测某年报：MD&A 概览页 534 分、
+        # 真利润表 536 分 —— **只差 2 分**。给概览页加 60 分直接把它顶上去，
+        # 利润表从第 93 页被拉到第 15 页。
+        #
+        # 扣分是安全的：它只会**降**可疑的页，不会把「引用数字的概览页」抬上来。
+        if _PARENT_TITLE.search(text) and "合并" not in text:
+            score -= _PARENT_PENALTY
+
+        # **附注里的「分部报告」页也要扣分**（实测：它拿 434 分，真利润表 383 分）。
+        # 只看页首 —— 页首写着「分部报告」的才是那张表本身。
+        if _SEGMENT_TITLE.search(text[:_SEGMENT_HEAD]):
+            score -= _SEGMENT_PENALTY
+
+        # **MD&A 的「变动分析表」也要扣分**（实测某券商公司：它 278 分、真表 277 分）。
+        # 判据是页首的「解释列」栏名（情况说明 / 变动原因 / 变动比例），
+        # 真报表没有解释列。同样是**只扣分**，不设允许页集合。
+        # 详见 `_MDA_CHANGE_TITLE`。
+        if _MDA_CHANGE_TITLE.search(text[:_MDA_HEAD]):
+            score -= _MDA_CHANGE_PENALTY
+
+        # **明细行加权加分 —— 不归零。**
+        #
+        # 原先这里是**硬门槛**（命中不足就把分归零）。结果在**文字层被打碎**
+        # 的材料上把整张表杀掉了：某白酒公司第 64 页（真现金流量表）的文字层是
+        # 「销售商品、提供劳务收到的现 183,990,403,487.80 金客户存款…」，
+        # 数字插在标签中间，连 `支付给职工` 这种四字片段都拼不出来 ——
+        # 门槛一卡，整张表判不出来，比判错更糟。
+        #
+        # 改成加分：有明细行的页赢过「引用数字的概览页」，但**没有明细行的
+        # 材料不会因此全盘失效**。弱信号也该被用上，只是不能假装它是强信号。
+        sub = _REQUIRED.get(kind)
+        if sub is not None:
+            _need, keys, _min = sub
+            score += _SUBSIDIARY_WEIGHT * sum(1 for k in keys if _has(text, low, k))
+        out[kind] = score
+    return out
+
+
+def page_scores(doc: ip.PdfDocument, strict: bool = True) -> list[PageScore]:
+    """每页对三类报表的证据分。
+
+    `starts_next` 也在这里算 —— `pick_pages` 手里只有分数、拿不到页面对象，
+    而「这一页是不是已经开始下一张表」必须看表格结构 ✗
+    """
+    out: list[PageScore] = []
+    for pg in doc.pages:
+        out.append(PageScore(
+            number=pg.number,
+            scores=signature(pg.text, _row_count(pg)),
+            starts_next={k: _starts_next_table(pg, k)
+                         for k in ("balance", "income")}))
+    return out
+
+
+#: ⚠️ **这个函数当前没有被调用** —— 见下面这段实测记录，先从调用处摘掉了。
+def _drop_parent_pages(doc: ip.PdfDocument,
+                       pages: list[int]) -> tuple[list[int], list[int]]:
+    """把页范围里**属于母公司报表**的页挑出来。返回 `(留下的, 剔除的)`。
+
+    ## ⚠️ 试过，**误伤**，已从调用处摘掉（实测记录，别急着再启用）
+    想解决的问题是真的：合并表与母公司表**印在相邻两页**时，页范围总是把
+    母公司那份也圈进来 → 同一个科目出现两个取值（实测某 A 股审计报告 21 个）。
+    按"页首表题里有「母公司 XX 表」"剔页，在**那份材料**上确实有效：
+    利润表 9–10 → [9]、现金流量表 11–12 → [11]，两表的冲突全消 ✓。
+
+    **但它误伤了另一份材料** ✗：某矿业公司 2021 那份
+        映射 balance 28 → **23**、income 10 → **5**、cash_flow 9 → **8**
+        EBITDA 率从 **+29.96%** 变成 **无值** ✗✗
+
+    原因很朴素：**页首提到「母公司」≠ 整页都是母公司报表**
+    （编制单位、附注引用、页眉公司名都可能带这三个字）。
+    判据太粗，就把合并表自己削掉了一半。
+
+    ## 要做对得换判据（留给下一次，别再用页首文字）
+    · 用**表内证据**：两张表各自的小计/合计能不能自洽（能自洽的那一份才完整）；
+    · 或者按**坐标**切（OCR 那边 `looks_two_sided` / `cluster_columns` 是同一个思路，
+      但那是给扫描件按坐标切的，这里是文字层的两栏表格，得另做）；
+    · 无论哪种，都必须先拿**多份材料**量过再说 —— 这一版的教训就是
+      "在一份材料上有效"不等于"能用"。
+
+    ## 2026-09-28 复测：「页内切栏」这件事**本来就在做，而且做对了**
+    · 第 7 页：`looks_two_sided=True` → 切 2 块，关键词命中 `['1/4', '3/4']`
+      （左块只有「资产总计」、右块有「负债合计 + 所有者权益」）——
+      这是**一张账户式（T 型）表**的正确切法 ✓
+    · 一份单栏排版的扫描件：1 块、不切 ✓ —— 不该动的没动 ✓
+    → 所以"合并/母公司**同页**"这个描述不准确：这一页是一张 T 型表被切成资产/负债两半，
+      **不是两张表并排**。别照这个描述去改。
+
+    ## 那「其他流动资产 6 个取值」是哪来的（也查清了）
+    该标签**全材料只出现 3 次**（第 7 / 8 / 45 页各一次）。6 个候选来自
+    **OCR 列坐标抖动 + 该行横跨左右半页**：实测第 7 页第 26 行是
+    `1 个标签 + 3 个数字 + 右侧半页的标签`（本该只有期末/年初两个数字）。
+    **已被"取首次出现 + 报警"如实兜住** —— 四个比率与基线一格不差 ✓。
+
+    ## 真剩下的只有一件事
+    **"年报里合并表排在母公司表前面"是页序约定，不是证据。** 该换成
+    "同一科目多页取值时，取**资产总计更大**那一页的（合并 = 母公司 + 子公司 − 抵销）"，
+    并把依据写进提示 —— 现在是对的，但**不牢**。
+    """
+    kept: list[int] = []
+    dropped: list[int] = []
+    for n in pages:
+        pg = doc.pages[n - 1] if 0 < n <= len(doc.pages) else None
+        head = ((pg.raw_text or "") if pg is not None else "")[:600]
+        (dropped if _PARENT_TITLE.search(head) else kept).append(n)
+    if not kept:
+        return list(pages), []
+    return kept, dropped
+
+
+def _anchor_by_title(doc: ip.PdfDocument, kind: str,
+                     rng: tuple[int, int]) -> list[int]:
+    """在 `rng` 范围内按**正文里印着的表题**找一张表。**只在打分失败时用。**
+
+    ## 为什么需要（实测：某白酒年报的现金流量表打不出分）
+
+    第 64 页原文（页中间那一行）：
+
+        …基本每股收益(元/股) 68.05 60.79
+        公司负责人:陈华 主管会计工作负责人:余思明 会计机构负责人:蔡聪应
+        **合并现金流量表** 2025年1—12月 单位:元 币种:人民币 项目 附注 …
+
+    **「合并现金流量表」这六个字明明白白印在页上** ✓
+    但同一页下半的明细行是打碎的：
+
+        销售商品、提供劳务收到的现 183,990,403,487.80 182,645,203,339.89 金客户存款和同业存放款项净…
+
+    「现金」被数字劈成两半 ✗ → 任何靠词频打分的办法都拿不到分 ✗
+    所以这里改用**标题**当判据 —— 它在，而且不会因为换行被打碎。
+
+    ## 三条防护
+
+    1. **只在打分失败后调用** —— 打分成功就走原路，行为一个字不变 ✓
+    2. **排除母公司表** —— 合并表后面紧跟着「母公司现金流量表」很常见，
+       只认合并（先找「合并XX表」，找不到再找裸标题但排除含「母公司」的页）
+    3. **最多取 6 页** —— 一张表再长也有限，防止一路吞到附注里
+    """
+    lo, hi = rng
+    from .from_pdf import TITLES
+
+    titles = TITLES.get(kind) or ()
+    if not titles:
+        return []
+    merged = [t for t in titles if t.startswith("合并")] or list(titles)
+
+    start: int | None = None
+    # ① 先找明确写了「合并」的页
+    for pg in doc.pages:
+        if not (lo <= pg.number <= hi):
+            continue
+        text = pg.text or ""
+        if any(t in text for t in merged):
+            start = pg.number
+            break
+    # ② 再找裸标题，但必须不是母公司
+    if start is None:
+        for pg in doc.pages:
+            if not (lo <= pg.number <= hi):
+                continue
+            text = pg.text or ""
+            if any(t in text for t in titles) and "母公司" not in text:
+                start = pg.number
+                break
+    if start is None:
+        return []
+
+    # ③ 往后扩：只要还有行就继续；碰到母公司表就停；最多 6 页
+    pages = [start]
+    for pg in doc.pages:
+        if pg.number <= start or pg.number > hi or len(pages) >= 6:
+            continue
+        if len(pages) >= 6:
+            break
+        if pg.number != pages[-1] + 1:
+            break
+        text = pg.text or ""
+        if "母公司" in text and any(t in text for t in titles):
+            break                              # 到母公司表了
+        if _row_count(pg) > 0:
+            pages.append(pg.number)
+        else:
+            break
+    return pages
+
+
+def _zero_outside(scores: list[PageScore],
+                  rng: tuple[int, int]) -> list[PageScore]:
+    """把范围**外**的页分数清零 —— 不是删掉，是清零。
+
+    ⚠️ **不能删**：`pick_pages` 靠 `by_num.get(n)` 顺着页码往前走，
+    页码不连续会直接 `break` ✗ 清零之后页码仍然连续，只是范围外拿不到分。
+    """
+    lo, hi = rng
+    out: list[PageScore] = []
+    for s in scores:
+        if lo <= s.number <= hi:
+            out.append(s)
+        else:
+            out.append(PageScore(number=s.number, scores={}, starts_next={}))
+    return out
+
+
+def pick_all(doc: ip.PdfDocument) -> tuple[dict[str, list[int]], list[str]]:
+    """挑三张表的页范围。返回 `(结果, 说明)`。
+
+    ## 三层顺序（从最像人的做法到最靠不住的）
+
+        ① 目录定范围    从目录读「财务报告」那一节的起止页，把候选页缩掉一大半
+        ② 页内打分      在缩小的范围里跑原来的判据
+        ③ 全文档兜底    范围法判不出 / 判出来找不到表 → 退回原来的全文档打分
+
+    ## 为什么要有 ①（实测：现金流量表被定位到 MD&A 的营收表）
+
+    某白酒年报 143 页，现金流量表被判到**第 10 页** —— 那是「主营业务分行业情况」
+    表，抽出来 17 行全是「茅台酒 / 直销 / 国内」，映射 0 个 ✗
+
+    原因是判据在**整份文档**上跑：
+
+        第 10 页  MD&A 里「三大现金流变动的原因说明」三句话写在同一页
+                  → 命中 3 组标志词 → 203 分，比真表还高 ✗
+        第 65 页  真表主体，但文字层被打碎，完整短语拼不出来 → 0 分 ✗
+
+    而它们在文档里的位置完全不同：第 10 页在「管理层讨论与分析」，
+    真表在「财务报告」。**先缩到「财务报告」这一节，第 10 页压根不进候选。**
+
+    ## 为什么要有「回落」（实测踩到）
+
+    `_REQUIRED` 明细行门槛在**文字层干净**的材料上很有效（某矿业公司 B、某铜业公司），
+    但在**文字层被打碎**的材料上完全失效：
+
+        某白酒公司 第 64 页（真现金流量表）
+        销售商品、提供劳务收到的现 183,990,403,487.80 金客户存款和同业存放款项净…
+
+    数字**插在标签中间**，`销售商品、提供劳务收到的现金` 这个串根本不存在，
+    连 `支付给职工` 这种四字片段都拼不出来。门槛一卡，整张表就没了。
+
+    所以：**先试严格；某一类全文档都判不出来时，退回不设门槛，
+    并把回落这件事说明出来。** 弱信号也比没有强，但不能假装它是强信号。
+    """
+    out: dict[str, list[int]] = {k: [] for k in ("balance", "income", "cash_flow")}
+    notes: list[str] = []
+
+    # ① 目录定范围
+    rng: tuple[int, int] | None = None
+    try:
+        from .from_pdf import section_range
+        rng = section_range(doc)
+    except Exception:                              # noqa: BLE001
+        rng = None
+
+    strict = page_scores(doc, strict=True)
+    scoped = _zero_outside(strict, rng) if rng else strict
+    if rng:
+        notes.append(
+            f"按目录把搜索范围缩到第 {rng[0]}–{rng[1]} 页（财务报告节）")
+
+    loose_used = False
+    for kind in ("balance", "income", "cash_flow"):
+        v = pick_pages(scoped, kind)
+        if not v and rng:
+            # ③ 范围内按**表题**锚定 —— 只在打分失败时走这一步。
+            # 打分成功就永远不会到这里，所以对已经能解析的材料零影响 ✓
+            v = _anchor_by_title(doc, kind, rng)
+            if v:
+                notes.append(
+                    f"{kind}：范围内打分没找到，已按表题锚定到第 {v[0]}–{v[-1]} 页")
+        if not v and rng:
+            # ④ 范围可能划错了 → 退回全文档严格打分
+            v = pick_pages(strict, kind)
+            if v:
+                notes.append(f"{kind}：缩范围后没找到，已退回全文档搜索")
+        if not v:
+            # ③ 严格门槛全文档都判不出 → 退回只看标志词
+            loose = page_scores(doc, strict=False)
+            if rng:
+                loose = _zero_outside(loose, rng)
+            v = pick_pages(loose, kind)
+            if not v and rng:
+                v = pick_pages(page_scores(doc, strict=False), kind)
+            if v:
+                loose_used = True
+                notes.append(f"{kind}：明细行门槛全文档命中不足，已回落到只看标志词")
+        if v:
+            # 页边界修正：只扩不替换（见 bounds.py 的实测记录）。
+            from . import bounds
+            v, bnotes = bounds.fix_bounds(doc, kind, v)
+            notes.extend(bnotes)
+        out[kind] = v
+    if loose_used:
+        notes.append("有表是回落判出来的 —— 弱信号，映射率要单独看")
+    # **不要在这里按页首表题锁锚点** —— 试过：修好了某券商公司，但把某保险公司的
+    # 映射从 20/11 压到 17/10（回归抓到的），而且三条路（页首表题 / 阈值 / 整页表题）
+    # 都没法只收中信不碰平安。完整实测表见 `_title_pages` 的说明。分数赢。
+    # **不要在这里按页首文字剔「母公司页」** —— 试过，误伤了一份材料的合并表
+    # （映射 28→23 / 10→5，EBITDA 率从 +29.96% 变无值）。原因与替代判据见
+    # `_drop_parent_pages` 的说明。多出来的母公司页目前由"取首次出现 + 报警"兜着。
+    return out, notes
+
+
+def _title_pages(doc: ip.PdfDocument, kind: str) -> list[int]:
+    """页首**写明表题**（「合并资产负债表」这类）的页 —— 最具体的写法优先。
+
+    ## ⚠️ 当前**没有被调用**：试过，修不好，已从调用处摘掉（别再试了）
+    想解决的问题是真的：`pick_pages` 的注释里留着"概览表 vs 真表"的量化数据 ——
+    某年报利润表真表 536 分 vs MD&A 概览 534 分，**只差 2 分**；有一份真表 markers 是 0。
+    当时的结论是"边际太薄，等找到更稳的组合再说"，而**表题看着像那个更稳的信号**：
+    它是**分类**的，不靠词表、不靠边际。实测某券商公司那份年报也**确实修好了**：
+
+        资产负债表  P40（MD&A 说明表，278 分）→ **P176（合并资产负债表，277 分）** ✓
+        利润表      P37（比率表，380 分）    → **P182（合并利润表，304 分）** ✓
+
+    **但它误伤了另一份** ✗（某保险公司中期报告，回归抓到的）：
+
+        映射 balance 20 → **17** · income 11 → **10** ✗
+        （真表被推到了 [111,112] / [114]，而原来选中的 [120] / [121] 分数更高）
+
+    ## 三条路都试过，**没有一条能只收中信、不碰平安**
+    | 判据 | 中信（该修） | 平安（不该动） | 能否分开 |
+    |---|---|---|---|
+    | 页首 600 字找表题 | income 比值 **0.80** | income 比值 **0.80** | ✗ **一模一样** |
+    | 放宽到**整页**找表题 | ✓ 修正 | ✗ 更糟：现金流被推到**第 2 页目录**（0 分） | ✗ |
+    | 分数比值设阈值 | 0.80~1.00 | 0.80~0.92 | ✗ 区间重叠 |
+
+    两者 income 的比值**分毫不差**（都是 0.80）—— 任何阈值都切不开。
+    平安的 [121] 页**整页都没有**表题文字（所以"放宽到整页"也救不回来），
+    而它恰恰是分数最高的那一页。分数与表题在这份材料上**就是矛盾的**，
+    而这个矛盾**没有可用的仲裁信号**（试过的都不行）。
+
+    → 结论：**分数赢**（保持现状），并把这条实测留下，免得下次再试一遍。
+    """
+    from .from_pdf import TITLES     # 延迟导入：单一口径，且避免循环导入
+    heads = [(pg.number, (pg.raw_text or "")[:600]) for pg in doc.pages]
+    for title in TITLES.get(kind, ()):          # TITLES 本身就是"最具体在前"
+        hit = [n for n, h in heads if title in h]
+        if hit:
+            return hit
+    return []
+
+
+#: **下一张表的开头行。** 同一页里出现它，说明本表在这一页到头了。
+#:
+#: ## 为什么需要这个（实测踩到，5/9 的 A 股年报栽在这里）
+#
+#: 年报常把三张表**连着排**，一张表在某页上半结束、下一张表在同一页下半开始：
+#:
+#:     第 99 页  usable_tables=2
+#:       表0  27行  ['非流动负债:', …]              ← 资产负债表的续页
+#:       表1  14行  ['一、营业总收入', …]           ← 利润表的开头
+#
+#: 原来的判据是「这一页对 kind 的分 ≥ 其他类就继续」✗ ——
+#: 第 99 页因为「非流动负债」那些行，资产负债表的分更高，于是被并进资产负债表范围 ✗
+#: 结果两张表的行搅在一起，行抽取崩成 0 行，整份文件被判成「不是正表」丢掉 ✗
+#:
+#: **页是连续的，表不是。** 判据必须落在「表」上。
+_NEXT_OPENERS: dict[str, tuple[str, ...]] = {
+    "balance": (
+        "一、营业总收入", "营业总收入", "一、营业收入", "营业收入",
+        "Operating revenues", "Total revenues", "Revenue",
+        "一、经营活动产生的现金流量", "经营活动产生的现金流量",
+        "Net cash provided by operating", "Cash flows from operating",
+    ),
+    "income": (
+        "一、经营活动产生的现金流量", "经营活动产生的现金流量",
+        "Net cash provided by operating", "Cash flows from operating",
+        "一、经营活动产生的现金流",
+    ),
+    "cash_flow": (),
+}
+
+
+def _starts_next_table(pg, kind: str) -> bool:
+    """这一页里是不是**已经开始了下一张表**。
+
+    ⚠️ **只在「一页多表」时才判** —— 单表页直接返回 False。
+    这条限制是有意的：单表页的行为一个字都不变，所以这个改动不可能引入回归。
+    """
+    openers = _NEXT_OPENERS.get(kind) or ()
+    if not openers:
+        return False
+    try:
+        tables = pg.usable_tables()
+    except Exception:                              # noqa: BLE001
+        return False
+    if len(tables) < 2:
+        return False                               # 单表页：不碰
+    tail = tables[-1][:8]                          # 只看最后一张表的前几行
+    txt = "　".join(str(c) for row in tail for c in row)
+    return any(o in txt for o in openers)
+
+
+def pick_pages(scores: list[PageScore], kind: str,
+               max_gap: int = 0, allowed: list[int] | None = None) -> list[int]:
+    """挑出属于 `kind` 的连续页。
+
+    1. 取分最高的那页当锚点；
+    2. 往后走，只要后面某页对 `kind` 的分**高于**其他类就继续；
+       遇到别的类的分明显更高就停。
+
+    `allowed` 参数（"锚点只从这些页里挑"）**当前没有被调用** ——
+    试过用页首表题当它，修好了某券商公司但误伤了某保险公司，三条路都分不开。
+    完整实测表见 `_title_pages` 的说明。留着签名是为了别让下一个人再写一遍。
+
+    ## ⚠️ 已知未解：概览表 vs 真表（附实测量化数据）
+
+    「管理层讨论与分析」里的**概览表**会罗列三张表的关键数字，
+    词面上和真表极其接近。实测某年报的利润表：
+
+        第 93页（真表）        总行31 带值23 **映射16**  markers 536
+        第 15页（MD&A 概览）   总行15 带值15 **映射10**  markers 534   ← 只差 2 分
+
+    某年报的现金流量表更极端：
+
+        第 64页（真表）        总行29 带值 9 **映射 1**  markers **0**
+        第 10页（MD&A 概览）   总行18 带值17 **映射 0**  markers 303   ← 真表 markers 是 0！
+
+    **「映射行数」这个信号的排序是对的**（16>10、17>16、1>0，三处全部指向真表），
+    但边际太薄（17 vs 16、1 vs 0），而且真表在某材料上的 markers 能低到 0
+    —— 直接换主排序会引入新的不确定性。**先把数据留在这里，等找到更稳的组合再说。**
+
+    ## ⚠️ 又一个已知未解：金融业报表的利润表被定位到附注里的分部报告页
+
+    实测一份 176 页的**保险公司中期报告**：利润表被定位到第 125–126 页，
+    而那两页的正文开头是「四、分部报告(续)……分部分析如下」—— 那是**附注**，
+    不是利润表。真利润表（「保险服务收入」「赔付支出」那几行）因为科目不在词表里
+    分数很低，而分部报告表里恰好有几个能命中的词，于是分更高。
+
+    **表现是"安静地取了一张错的表"**（映射 8/76 行，收入/营业利润全缺）。
+    所以映射率过低时必须有显式警告 —— 见 `Statements.mapping_warnings()`。
+    要真正修好，得先有金融业科目词表，再让"分数"把真表选出来。
+
+    ### 补测三份金融样本（某寿险公司 / 中国再保险 / 某券商公司）后的实测结论
+    说明**光有词表还不够**，这层比想象的靠前：
+      · 某寿险公司（上交所年报）：资产负债表 69 行、**映射 0 个字段**（利润表反而是 11 个 ✓）
+      · 某券商公司（公司官网年报）：资产负债表取到的是 **MD&A 的资产结构说明表** ✗
+        —— 表头是「项目名称 … 情况说明」，行是「负债总额为人民币亿元，同比上年度末增加人民币亿元」
+        这类**没有数字的散文**（数字被从文字层里剥离成了独立单元格）
+      · 中国再保险（英文年报）：三张表**一行都没取到**（整条管线是中文中心的）
+
+    根因是**文字层被打碎**：这类材料的表格文字是碎片化的，
+    `_REQUIRED` 明细行加分的信号被削弱，于是 MD&A 页（词面上更全）赢过真表。
+    **要打通金融业，顺序是**：① 金融业科目词表 → ② 在这种碎片文字层上也能定位到真表
+    → ③ 科目映射 → ④ 才谈得上行业判定与金融业估值方法。
+    在这之前不要做行业判定：判据不足会误判（见 `meta._FIN_SIGNS` 里退回的那一版）。
+
+
+    ## ⚠️ 另一个已知未解：合并表与母公司表同页（扫描件）
+    审计报告常把**合并报表和母公司报表印在同一页**（左右两栏或上下相接）。
+    OCR 抽出来的科目会**串**：实测某 A 股审计报告（249 页纯扫描件）
+    有 21 个科目出现两个取值，于是
+    `期末现金 = 期初 + 经营 + 投资 + 筹资` 不平。
+
+    表现是**勾稽不平**（不是静默错），`intake.appraise` 会把成因点出来。
+    修它要先从版面切出列、判断"这一页里有两张表" —— 没做。
+    详见 README 的「已知限制」。
+    """
+    anchor = None
+    best = 0
+    for s in scores:
+        if allowed and s.number not in allowed:      # 表题页之外不参选
+            continue
+        v = s.scores.get(kind, 0)
+        if v > best:
+            anchor, best = s.number, v
+    if anchor is None and allowed:
+        # 表题页一个分都没有 → **退回全体**。宁可照旧，也不要交出空表。
+        return pick_pages(scores, kind, max_gap, allowed=None)
+    if anchor is None:
+        return []
+
+    by_num = {s.number: s for s in scores}
+    pages = [anchor]
+
+    # 往后
+    gap = 0
+    n = anchor
+    total = max(by_num) if by_num else anchor
+    while n < total:
+        n += 1
+        s = by_num.get(n)
+        if s is None:
+            break
+        # ★ **这一页已经开始了下一张表 → 本表到此为止。**
+        # 只在「同一页里有多张表」时触发（单表页的标志永远是 False，行为不变）。
+        # 不这么判的话，第 99 页那种「资产负债表续页 + 利润表开头」的页会被并进来，
+        # 两张表的行搅在一起，行抽取崩成 0 行，整份文件被判成「不是正表」丢掉 ✗
+        if s.starts_next.get(kind):
+            break
+        mine = s.scores.get(kind, 0)
+        other = max((v for k, v in s.scores.items() if k != kind), default=0)
+        if mine >= other and mine > 0:
+            pages.append(n)
+            gap = 0
+        elif mine == 0 and other == 0 and gap < max_gap:
+            pages.append(n)                 # 中间的空白页 / 跨页续行
+            gap += 1
+        else:
+            break
+
+    # 往前（表可能从锚点前一页开始）
+    n = anchor
+    while n > 1:
+        n -= 1
+        s = by_num.get(n)
+        if s is None:
+            break
+        mine = s.scores.get(kind, 0)
+        other = max((v for k, v in s.scores.items() if k != kind), default=0)
+        if mine > 0 and mine >= other:
+            pages.insert(0, n)
+        else:
+            break
+
+    return sorted(pages)
+
+
+def statements_map(scores: list[PageScore]) -> dict[str, list[int]]:
+    return {k: pick_pages(scores, k) for k in _MARKERS}

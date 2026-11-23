@@ -1,0 +1,348 @@
+"""`ingest/ocr.py` 的测试。
+
+**每一条都是被真实材料逼出来的**，取材自某非上市公司 2024 年审计报告
+（34 页纯扫描件，走 macOS Vision 框架）。
+
+这里只测纯函数 —— 不碰 Swift、不碰文件，所以在任何机器上都能跑。
+`available()` 单独测，它会随平台返回不同结果。
+"""
+
+import unittest
+
+from ingest.ocr import (
+    _is_row_number, _is_value_like, _runs, available, cluster_columns,
+    is_amount_ish, parse_amount, repair_systematic, rows_to_table,
+)
+
+
+class TestParseAmount(unittest.TestCase):
+    def test_valid(self):
+        for text in ("6,840,705.08", "186", "-14,439,051.25", "0"):
+            v, s = parse_amount(text)
+            self.assertEqual(s, "ok", text)
+            self.assertIsNotNone(v)
+
+    def test_paren_negative(self):
+        """中文和美股报表都用括号表示负数。"""
+        self.assertEqual(parse_amount("(601,579)"), (-601579.0, "ok"))
+
+    def test_currency_prefix(self):
+        self.assertEqual(parse_amount("¥1,234.00"), (1234.0, "ok"))
+
+    def test_dash_is_zero_not_missing(self):
+        """破折号表示零 / 无 —— 和「没填」是两回事。"""
+        for d in ("–", "—", "-", "N/A"):
+            self.assertEqual(parse_amount(d), (None, "dash"), d)
+
+    def test_empty(self):
+        for e in ("", "   ", None):
+            self.assertEqual(parse_amount(e), (None, "empty"), repr(e))
+
+    def test_suspect_is_rejected_not_coerced(self):
+        """**判据不明确的必须返回 None，绝不能凑一个数出来。**
+
+        `334.719.50` 若按「剥掉非数字」处理会变成 33471950 ——
+        差 100 倍且不报错。财务数据上这种静默错误最危险。
+        """
+        for bad in ("45.508.51239", "4 916.422 83", "505o18914969", "13291923"):
+            v, s = parse_amount(bad)
+            self.assertIsNone(v, bad)
+            self.assertEqual(s, "suspect", bad)
+
+
+class TestRepairSystematic(unittest.TestCase):
+    """系统性 OCR 错误：千分位逗号被认成句点或空格。
+
+    这不是随机噪声 —— 同一个字符被稳定认错，错误模型是确定的，
+    所以可以按严格判据修。**随机错误不能用这招。**
+    """
+
+    def test_comma_read_as_period(self):
+        self.assertEqual(repair_systematic("334.719.50"), "334,719.50")
+        self.assertEqual(repair_systematic("1.609.705.35"), "1,609,705.35")
+        self.assertEqual(repair_systematic("248.534.085.01"), "248,534,085.01")
+
+    def test_comma_read_as_space(self):
+        self.assertEqual(repair_systematic("85 748 813 69"), "85,748,813.69")
+
+    def test_comma_then_space(self):
+        """**实测某上市公司 2022 审计报告**：千分位逗号后多插了一个空格。
+
+        40 个金额全栽在这一条上，包括 `资产总计` —— 整条勾稽判不了。
+        """
+        self.assertEqual(repair_systematic("7, 756,942, 510.86"), "7,756,942,510.86")
+        self.assertEqual(repair_systematic("770, 501, 087. 14"), "770,501,087.14")
+        self.assertEqual(repair_systematic("2, 562, 165,433.39"), "2,562,165,433.39")
+
+    def test_comma_then_space_refuses_two_cells(self):
+        """**去掉空格后必须仍符合三位分组，否则不修。**
+
+        `1,234 5,678` 本来是两格；去空格得 `1,2345,678`，分组不合法 → 拒绝。
+        """
+        self.assertIsNone(repair_systematic("1,234 5,678"))
+        self.assertIsNone(repair_systematic("1 2"))
+
+    def test_repair_must_actually_change_something(self):
+        """本来就合法的数不该被报成「修过」。
+
+        否则下游会以为这个数被动过手脚。实测这条被 `test_leaves_valid_numbers_alone`
+        抓到过。
+        """
+        self.assertIsNone(repair_systematic("6,840,705.08"))
+        self.assertEqual(parse_amount("6,840,705.08")[1], "ok")
+
+    def test_refuses_ambiguous(self):
+        """**末组位数不对就不能猜。**
+
+        `45.508.51239` 的末组是 5 位，归不了位 —— 它到底该是
+        `45,508,512.39` 还是别的，无法从字面断定。宁可当可疑值剔掉。
+        """
+        for bad in ("45.508.51239", "4 916.422 83", "13291923", "65,890 422.07"):
+            self.assertIsNone(repair_systematic(bad), bad)
+
+    def test_leaves_valid_numbers_alone(self):
+        self.assertIsNone(repair_systematic("6,840,705.08"))
+
+    def test_parse_marks_repairs_distinctly(self):
+        """修出来的数要能和原生的数分开统计。"""
+        self.assertEqual(parse_amount("334.719.50"), (334719.50, "repaired"))
+        self.assertEqual(parse_amount("6,840,705.08")[1], "ok")
+
+
+class TestIsAmountIsh(unittest.TestCase):
+    def test_plain_text_is_not_amount_ish(self):
+        """**纯中文标签不能被当成「格式不对的金额」。**
+
+        否则「资产负债表」「交易性金融资产」都会被算进值列，整张表错位。
+        """
+        for t in ("资产负债表", "货币资金", "流动资产合计", "单位：元"):
+            self.assertFalse(is_amount_ish(t), t)
+
+    def test_malformed_number_is_amount_ish(self):
+        for t in ("334.719.50", "45.508.51239", "1,079,71"):
+            self.assertTrue(is_amount_ish(t), t)
+
+    def test_fullwidth_punctuation(self):
+        """`202.，275,237.27` 混进全角逗号 —— 不认全角就报不出来。"""
+        self.assertTrue(is_amount_ish("202.，275,237.27"))
+
+
+class TestRowNumber(unittest.TestCase):
+    def test_small_integer_is_row_number(self):
+        for t in ("1", "14", "34", "75"):
+            self.assertTrue(_is_row_number(t), t)
+
+    def test_money_is_not_row_number(self):
+        for t in ("6,840,705.08", "186.00", "601,579"):
+            self.assertFalse(_is_row_number(t), t)
+
+
+class TestRuns(unittest.TestCase):
+    def test_contiguous(self):
+        self.assertEqual(_runs([1, 2, 3, 7, 8, 10]),
+                         [(1, 3), (7, 8), (10, 10)])
+
+    def test_empty(self):
+        self.assertEqual(_runs([]), [])
+
+
+class TestColumnClustering(unittest.TestCase):
+    def test_separate_columns(self):
+        centers = cluster_columns([
+            [(0.10, "a"), (0.50, "1"), (0.70, "2")],
+            [(0.10, "b"), (0.50, "3"), (0.70, "4")],
+        ])
+        # 三个明显不同的 x → 三列
+        self.assertEqual(len(centers), 3)
+
+    def test_near_x_merges(self):
+        centers = cluster_columns([[(0.10, "a"), (0.11, "b"), (0.30, "c")]])
+        self.assertEqual(len(centers), 2)
+
+    def test_empty(self):
+        self.assertEqual(cluster_columns([]), [])
+
+
+def _page(rows):
+    """构造一页 (x, 文本) 的行，取材自真实资产负债表。
+
+    真实坐标（取自某非上市公司 2024 年报第 4 页）：
+
+        科目名左对齐   x≈0.177
+        合计行右对齐   x≈0.271     ← 同一个视觉列，x 差很远
+        行次           x≈0.485
+        期末余额       x≈0.589
+        上年年末余额   x≈0.752
+    """
+    return [[(0.177, "货币资金"), (0.485, "1"), (0.589, "6,840,705.08"), (0.752, "6,658,401.03")],
+            [(0.177, "应收账款"), (0.485, "3"), (0.589, "47,373,405.86"), (0.752, "61,996,794.23")],
+            [(0.271, "流动资产合计"), (0.485, "14"), (0.589, "78,593,867.51"), (0.752, "109,460,973.80")],
+            [(0.288, "资产总计"), (0.485, "34"), (0.589, "150,066,440.63"), (0.752, "202,275,237.27")]] + rows
+
+
+class TestRowsToTable(unittest.TestCase):
+    """OCR 行 → 表格。这一步做不对，金额就会落到错误的栏。"""
+
+    def test_right_aligned_total_keeps_its_label(self):
+        """**合计行的标签右对齐，不能因此丢掉。**
+
+        中文财报里普通科目名左对齐（x≈0.177），合计行右对齐（x≈0.27）。
+        按 x 聚类会分成两列；只取最左列就取空了 —— 于是资产总计、
+        负债合计全变成「没有标签」，**勾稽直接判不了**。
+
+        正确做法：标签 = 第一个数字列**左边的一切**。
+        """
+        out = rows_to_table(_page([]))
+        labels = [r[0] for r in out]
+        self.assertIn("流动资产合计", labels)
+        self.assertIn("资产总计", labels)
+
+    def test_total_values_land_in_right_columns(self):
+        out = rows_to_table(_page([]))
+        total = next(r for r in out if r[0] == "资产总计")
+        self.assertEqual(total[2], "150,066,440.63")     # 期末
+        self.assertEqual(total[3], "202,275,237.27")     # 上年年末
+
+    def test_row_number_is_not_a_value(self):
+        """`行次` 是小整数，**绝不能当金额**。"""
+        out = rows_to_table(_page([]))
+        cash = next(r for r in out if r[0] == "货币资金")
+        self.assertEqual(cash[1], "1")                   # 行次单独一列
+        self.assertEqual(cash[2], "6,840,705.08")
+
+    def test_suspect_value_is_marked(self):
+        """判据不明确的金额带上 `？`，**可见地**留下而不是静默当数用。"""
+        rows = _page([[(0.177, "预付款项"), (0.485, "7"), (0.589, "45.508.51239"),
+                       (0.752, "10,677,467.06")]])
+        out = rows_to_table(rows)
+        pre = next(r for r in out if r[0] == "预付款项")
+        self.assertEqual(pre[2], "？45.508.51239")
+
+    def test_repaired_value_is_output_in_fixed_form(self):
+        """**修好的数必须以修好的形式输出。**
+
+        输出原文的话，下游 `_to_number("334.719.50")` 会剥成 33471950
+        —— 差 100 倍且不报错。实测踩到。
+        """
+        rows = _page([[(0.177, "预付款项"), (0.485, "7"), (0.589, "334.719.50"),
+                       (0.752, "10,677,467.06")]])
+        out = rows_to_table(rows)
+        pre = next(r for r in out if r[0] == "预付款项")
+        self.assertEqual(pre[2], "334,719.50")
+
+    def test_empty_input(self):
+        self.assertEqual(rows_to_table([]), [])
+
+
+class TestValueLikeVsNumeric(unittest.TestCase):
+    """这两个判断必须分开 —— 合并了 `？` 标记就会丢。"""
+
+    def test_suspect_is_value_like_but_not_numeric(self):
+        self.assertTrue(_is_value_like("334.719.50"))
+        self.assertFalse(parse_amount("334.719.50")[1] == "ok")
+
+    def test_row_number_is_value_like(self):
+        self.assertTrue(_is_value_like("14"))
+
+    def test_text_is_neither(self):
+        self.assertFalse(_is_value_like("资产负债表"))
+
+
+class TestAvailability(unittest.TestCase):
+    def test_available_returns_bool(self):
+        self.assertIsInstance(available(), bool)
+
+
+class TestTwoSidedStatements(unittest.TestCase):
+    """左右两栏（T 型）资产负债表：**该切的要切，不该切的不许切**。
+
+    坐标取自真材料的 OCR 缓存（某扫描件第 7、8 页），不是编的：
+    第 7 页那一行是
+        应收账款 x=0.097 │ 0.308 │ 0.421 ‖ 应付账款 x=0.515 │ 0.678 │ 0.832
+    不切的话，「应付账款」拿到的是**应收账款那栏的金额**，而且不报错。
+
+    但切栏这件事前人试过一次、**因为误伤单栏报表被回退了**：
+    中文财报的合计行右对齐（货币资金 x=0.177 vs 资产总计 x=0.288），
+    一刀切会把合计行切走，勾稽从「平」变成「数据不足」。
+    所以这里两条都要钉：**两栏必须切开**、**单栏必须不切**。
+    """
+
+    def _table(self, rows):
+        from ingest import ocr
+        return ocr.rows_to_table(rows)
+
+    def _row_of(self, table, label):
+        return next((r for r in table if r and r[0].strip() == label), None)
+
+    def test_two_sided_page_keeps_each_side_own_numbers(self):
+        from ingest import ocr
+        page = [
+            [(0.097, "应收账款"), (0.308, "1,234,567.89"), (0.421, "1,111,111.11"),
+             (0.515, "应付账款"), (0.678, "2,222,222.22"), (0.832, "2,333,333.33")],
+            [(0.097, "存货"), (0.308, "3,333,333.33"), (0.421, "3,444,444.44"),
+             (0.515, "预收款项"), (0.678, "4,444,444.44"), (0.832, "4,555,555.55")],
+            [(0.097, "流动资产合计"), (0.308, "5,555,555.55"), (0.421, "5,666,666.66"),
+             (0.515, "流动负债合计"), (0.678, "6,666,666.66"), (0.832, "6,777,777.77")],
+            [(0.097, "资产总计"), (0.308, "7,777,777.77"), (0.421, "7,888,888.88"),
+             (0.515, "负债合计"), (0.678, "8,888,888.88"), (0.832, "8,999,999.99")],
+        ]
+        self.assertTrue(ocr.looks_two_sided(page), "这一页明显是两栏，判成单栏了")
+        table = self._table(page)
+        ar = self._row_of(table, "应收账款")
+        ap = self._row_of(table, "应付账款")
+        self.assertIsNotNone(ar)
+        self.assertIsNotNone(ap)
+        self.assertIn("1,234,567.89", ar[1:], f"应收账款拿到了别的栏的数：{ar}")
+        self.assertNotIn("2,222,222.22", ar[1:], "应收账款拿到了右边应付账款的金额 ✗")
+        self.assertIn("2,222,222.22", ap[1:], f"应付账款没有拿到自己那栏的数：{ap}")
+        self.assertNotIn("1,234,567.89", ap[1:], "应付账款拿到了左边应收账款的金额 ✗")
+
+    def test_single_column_page_is_not_cut(self):
+        """单栏报表（合计行右对齐）**不许**被切开 —— 这是前人踩过的回归。"""
+        from ingest import ocr
+        page = [
+            [(0.177, "货币资金"), (0.520, "1,000,000.00"), (0.700, "900,000.00")],
+            [(0.271, "流动资产合计"), (0.520, "2,000,000.00"), (0.700, "1,900,000.00")],
+            [(0.288, "资产总计"), (0.520, "3,000,000.00"), (0.700, "2,900,000.00")],
+            [(0.271, "负债合计"), (0.520, "1,000,000.00"), (0.700, "900,000.00")],
+            [(0.288, "所有者权益合计"), (0.520, "2,000,000.00"), (0.700, "1,900,000.00")],
+            [(0.177, "短期借款"), (0.520, "500,000.00"), (0.700, "400,000.00")],
+        ]
+        self.assertFalse(ocr.looks_two_sided(page), "单栏报表被误判成两栏")
+        table = self._table(page)
+        for label in ("资产总计", "负债合计", "所有者权益合计", "流动资产合计"):
+            row = self._row_of(table, label)
+            self.assertIsNotNone(row, f"切栏把合计行「{label}」的标签弄丢了（这就是那次回归）")
+
+    def test_missing_left_values_do_not_borrow_from_the_right(self):
+        """左栏金额没认出来时（实测第 8 页就是这样）**绝不许**拿右栏的数顶上。
+
+        那一行 OCR 只认出：应收账款的标签、应付账款的标签、右边两个数。
+        不切的话，应收账款的金额会变成负债那栏的数字 —— 静默错，且不报错。
+        """
+        from ingest import ocr
+        page = [
+            [(0.113, "应收账款"), (0.507, "应付账款"), (0.721, "9,999,999.99"),
+             (0.828, "8,888,888.88")],
+            [(0.113, "预付款项"), (0.507, "预收款项"), (0.721, "7,777,777.77"),
+             (0.828, "6,666,666.66")],
+            [(0.113, "其他应收款"), (0.507, "其他应付款"), (0.721, "5,555,555.55"),
+             (0.828, "4,444,444.44")],
+            [(0.113, "存货"), (0.507, "应付职工薪酬"), (0.721, "3,333,333.33"),
+             (0.828, "2,222,222.22")],
+        ]
+        table = self._table(page)
+        # 真正要钉的不变量：**任何一行，只要出现「应收账款」，就不许带着右栏那两个数**。
+        # 切开后「应收账款」这行的数值是空的 —— 那是正确结果（材料里没读到），
+        # 上层会照实报"缺数"，而不是拿负债的数顶上。
+        for row in table:
+            if any("应收账款" in (c or "") for c in row):
+                self.assertNotIn("9,999,999.99", row, f"应收账款那行串到右栏了：{row}")
+                self.assertNotIn("8,888,888.88", row, f"应收账款那行串到右栏了：{row}")
+        ap = self._row_of(table, "应付账款")
+        if ap:
+            self.assertIn("9,999,999.99", ap[1:], f"应付账款该拿到自己那栏的数：{ap}")
+
+
+if __name__ == "__main__":
+    unittest.main()

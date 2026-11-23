@@ -1,0 +1,398 @@
+"""从**附注**里取估值要的字段 —— 目前是折旧摊销（D&A）。
+
+## 为什么必须做这一步（实测）
+
+估值引擎的 `DcfInputs` 要 `da_pct_revenue`，倍数法要 EBITDA，
+而 `financials/derive.py` 里 `ebitda()` / `net_debt()` 早就写好了 ——
+**但链子从源头就断了：D&A 抽不到。**
+
+实测三家材料，D&A 全是空：
+
+    某白酒公司       ✗    某非上市公司   ✗    某 H 股公司   ✗
+
+原因不是材料没有，是**我只读了三张表的主表页**。D&A 在**附注**里：
+
+    某白酒公司 第 115 页「补充资料」—— 现金流量表补充资料（间接法调节段）
+    某非上市公司 第 31 页
+
+    1.将净利润调节为经营活动现金流量:
+      净利润 85,310,324,833.67
+      加:资产减值准备信用减值损失 -17,234,379.37
+      固定资产折旧、油气资产折耗、生产性生物资产折旧 1,893,338,311.91
+      使用权资产摊销 55,797,324.89
+      无形资产摊销 289,613,682.99
+      长期待摊费用摊销 20,637,734.49
+
+**A 股主表没有间接法段**（`articulation` 一直在报「不适用」，就是这个原因），
+调节表只在补充资料里。所以估值需要的字段，**必须从附注取**。
+
+## 解析难点：数字插在标签中间
+
+和主表一样，文字层会把数字塞进标签里：
+
+    固定资产折旧、油气资产折耗、生产 1,893,338,311.91 1,721,165,327.14 性生物资产折旧
+
+完整标签不存在。所以**用前缀定位，再取它后面第一个金额**。
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+from ingest import pdf as ip
+
+#: 间接法调节段的标志 —— 中英港三套写法
+#
+# ⚠️ **必须写成「现金流量表补充资料」，不能用裸的「补充资料」。**
+#
+# 实测（某广告营销公司 2025 年报）：第 152 页的小节标题是
+#
+#     (五十六)现金流量表补充资料
+#     1.现金流量表补充资料
+#     补充资料  本期发生额  上期发生额
+#     净利润 222,834,022.41 …
+#     加:资产减值准备 …
+#     固定资产折旧、油气资产折耗、生产性生物资产折旧 12,862,647.54
+#
+# **一整段都在，但「将净利润调节为经营活动现金流量」这句话一个字都没有** ——
+# 于是 `find_reconciliation_pages` 返回空，D&A 抽不到，
+# `appraise` 直接判「估值结论不可用」。**终点产出卡在这一个词上。**
+#
+# 而同一份材料的第 186 页还有「二十、补充资料（非经常性损益）」——
+# **裸的「补充资料」会把它也抓进来**，所以只用全称。
+_RECON_MARKERS = (
+    "将净利润调节为经营活动现金流量",
+    "将净利润调节为经营活动产生的现金流量",
+    "净利润调节为经营活动现金流量",
+    # A 股年报最常见的写法：小节名就叫「现金流量表补充资料」
+    "现金流量表补充资料",
+    "Adjustments for:",
+    "Adjusted for:",
+    "Reconciliation of profit",
+    "Profit before taxation adjusted for",
+)
+
+#: 折旧摊销的各组成部分。
+#: 值 = 用来定位的**前缀**（短，不会被数字切断），键 = 展示名。
+#: ⚠️ 顺序有意义：长的、更具体的放前面 —— 「固定资产折旧」会命中
+#: 「固定资产折旧、油气资产折耗、生产性生物资产折旧」这一整行，是对的；
+#: 但反过来就错了。
+_DA_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("固定资产折旧", "固定资产折旧"),
+    ("投资性房地产折旧", "投资性房地产折旧"),
+    ("使用权资产摊销", "使用权资产摊销"),
+    ("无形资产摊销", "无形资产摊销"),
+    ("长期待摊费用摊销", "长期待摊费用摊销"),
+    ("油气资产折耗", "油气资产折耗"),
+    ("生产性生物资产折旧", "生产性生物资产折旧"),
+    ("Depreciation of property", "固定资产折旧"),
+    ("Depreciation of right-of-use", "使用权资产摊销"),
+    ("Depreciation of investment properties", "投资性房地产折旧"),
+    ("Amortisation of intangible", "无形资产摊销"),
+    ("Amortization of intangible", "无形资产摊销"),
+)
+
+#: 金额 —— 带千分位和小数，或括号负数
+_AMOUNT = re.compile(r"\(?-?[\d,]+(?:\.\d+)?\)?")
+#: OCR 常把负号认成汉字「一」（附注里写「以“一”号填列」就是这个原因）。
+#: 只在**紧贴在数字前**时才当负号 —— 否则会把正文里的「一」误伤。
+_DASH_VARIANTS = "一－–—‐−"
+
+#: 间接法恒等式的两端与各调节项。
+#:   净利润 + Σ调节项 = 经营活动产生的现金流量净额
+#: 这条恒等式**是页面内勾稽的抓手**：任何一个数字被 OCR 读错（哪怕是
+#: `1,234,567,890.12` → `1,234,567.12` 这种形状完全合法的错），恒等式就不平 ——
+#: 不需要知道真值就能发现 ✗。实测某 104 页扫描件就是这么发现 D&A 量级不对的。
+_INDIRECT_ITEMS: tuple[tuple[str, str], ...] = (
+    ("资产减值准备", "资产减值准备"),
+    ("信用减值损失", "信用减值损失"),
+    ("处置固定资产", "处置固定资产损失"),
+    ("固定资产报废损失", "固定资产报废损失"),
+    ("公允价值变动", "公允价值变动损失"),
+    ("财务费用", "财务费用"),
+    ("投资损失", "投资损失"),
+    ("递延所得税资产减少", "递延所得税资产减少"),
+    ("递延所得税负债增加", "递延所得税负债增加"),
+    ("存货的减少", "存货的减少"),
+    ("经营性应收项目的减少", "经营性应收项目的减少"),
+    ("经营性应付项目的增加", "经营性应付项目的增加"),
+)
+#: 恒等式的起点
+_INDIRECT_START = ("净利润", "净亏损")
+#: 恒等式的终点
+_INDIRECT_TARGET = ("经营活动产生的现金流量净额", "经营活动现金流量净额")
+#: 数字插在标签里时，标签会被截成「…固定资产折旧、油气资产折耗、生产」
+#: 这种样子，末尾是一个中文字。允许前缀后面跟**少量非数字字**再出现金额。
+
+
+@dataclass
+class DepreciationAmortisation:
+    """从附注里抽出来的折旧摊销。"""
+
+    components: dict[str, float] = field(default_factory=dict)
+    pages: list[int] = field(default_factory=list)
+    #: 抽到的原文行，便于人工复核
+    evidence: list[str] = field(default_factory=list)
+    note: str = ""
+    #: 间接法恒等式的核对结果（页面内勾稽）
+    reconcile: IndirectReconcile | None = None
+
+    @property
+    def suspect(self) -> bool:
+        """这个 D&A **有理由被怀疑**吗（恒等式不平）。
+
+        不删数、不改成 0，只是标出来 —— 拿一个错的数去算 EBITDA，
+        比留下一处"请核对"糟糕得多。
+        """
+        return bool(self.reconcile and self.reconcile.checked and not self.reconcile.ok)
+
+    @property
+    def total(self) -> float | None:
+        return sum(self.components.values()) if self.components else None
+
+    def render(self, unit: str = "") -> str:
+        if not self.components:
+            return f"  折旧摊销：**未取到**（{self.note or '附注里没找到调节段'}）"
+        out = [f"  折旧摊销合计：**{self.total:,.2f}**{unit}"
+               f"（取自第 {'、'.join(str(p) for p in self.pages)} 页附注）"]
+        for k, v in self.components.items():
+            out.append(f"      {k}  {v:,.2f}")
+        # **可疑就要写在数旁边。** 取到了数不等于数是对的：中间那一步 OCR 认知错误
+        # （`1,234,567,890.12` → `1,234,567.12`）形状完全合法，只有页面内勾稽能发现。
+        if self.suspect and self.reconcile:
+            out.append(f"      ⚠ 间接法恒等式不平（差 {self.reconcile.diff:,.2f}{unit}）"
+                       "—— 这一段数字很可能被 OCR 读错，**请人工核对后再用**")
+        return "\n".join(out)
+
+
+def _to_number(s: str) -> float | None:
+    t = s.strip().replace(",", "").replace(" ", "")
+    neg = t.startswith("(") and t.endswith(")")
+    t = t.strip("()")
+    try:
+        v = float(t)
+    except ValueError:
+        return None
+    return -v if neg else v
+
+
+def find_reconciliation_pages(doc: ip.PdfDocument) -> list[int]:
+    """哪几页有「将净利润调节为经营活动现金流量」这一段。"""
+    return [pg.number for pg in doc.pages
+            if any(m in pg.text for m in _RECON_MARKERS)]
+
+
+def _expand_recon_window(pages: list[int], doc: ip.PdfDocument) -> list[int]:
+    """把「调节段」的页码向后扩 —— 因为标记常常落在**页脚**，明细在下一页。
+
+    实测（某 104 页扫描件）：标记「将净利润调节为经营活动现金流量」出现在第 72 页
+    页脚，而**真正的折旧摊销行全在第 73 页**。不扩窗口的话，抽取器报
+    「找到调节段（第 [72] 页）但没解析出折旧摊销行」—— 找到了段、拿到了空，
+    最后表现为「EBITDA 率和折旧摊销率都取不到」。
+
+    扩的边界用词守住：后一页还得在讲这同一段（补充资料 / 净利润 / 调节 / 经营活动现金流量），
+    否则停 —— 不然会把后面附注里的别的折旧行当成调节段那一行（那是另一种错，见 `extract_da`）。
+    """
+    by_number = {pg.number: pg for pg in doc.pages}
+    keep = set(pages)
+    for n in pages:
+        for nxt in (n + 1, n + 2):
+            pg = by_number.get(nxt)
+            if pg is None:
+                break
+            if any(k in (pg.text or "") for k in _RECON_MARKERS) or \
+                    any(k in (pg.text or "") for k in ("补充资料", "净利润", "调节")):
+                keep.add(nxt)
+            else:
+                break
+    return sorted(keep)
+
+
+#: 恒等式允许多大的差：以 CFO 的 0.05% 为准，另有 1 元下限。
+#: 不必卡到 0 —— 报表本身可能有舍入，但**一个被读错的数字**远大于这个量级。
+_RECON_TOL_REL = 0.0005
+
+
+def _amount_after_pos(text: str, prefix: str) -> tuple[float, int] | None:
+    """`prefix` 之后第一个金额**及其位置**。
+
+    返回位置是为了去重：`固定资产折旧、投资性房地产折旧` 这一行会被
+    「固定资产折旧」和「投资性房地产折旧」两个前缀同时命中，取到**同一个数** ——
+    不去重就重复计数（实测把 D&A 从 22.6 亿算成 41.5 亿，而且不报错）。
+    `extract_da` 里早有这个防护，新写的核对函数也必须带上。
+    """
+    idx = text.find(prefix)
+    if idx < 0:
+        return None
+    after = text[idx + len(prefix):idx + len(prefix) + 48]
+    m = _AMOUNT.search(after)
+    if not m:
+        return None
+    raw = m.group(0)
+    before = after[m.start() - 1] if m.start() > 0 else ""
+    neg = raw.startswith("(") or raw.startswith("-") or before in _DASH_VARIANTS
+    core = raw.strip("()").lstrip("-").replace(",", "")
+    if not core:
+        return None
+    try:
+        v = float(core)
+    except ValueError:
+        return None
+    return (-v if neg else v), idx + len(prefix) + m.start()
+
+
+def _amount_after(text: str, prefix: str) -> float | None:
+    """`prefix` 之后第一个金额。**负号被 OCR 认成「一」时也认得出来。**
+
+    实测：OCR 把 `-17,234,379.37` 的负号认成汉字「一」（附注里那句
+    「以“一”号填列」自己就说明了这个习惯）。不处理的话，调节段里所有负数
+    都会被当成正数 —— 恒等式必然不平，而这个"不平"是**我们自己造成的**，
+    不能拿去指控材料。
+    """
+    hit = _amount_after_pos(text, prefix)
+    return hit[0] if hit else None
+
+
+def _amount_after_multi(text: str, prefixes: tuple[str, ...]) -> float | None:
+    for p in prefixes:
+        v = _amount_after(text, p)
+        if v is not None:
+            return v
+    return None
+
+
+@dataclass
+class IndirectReconcile:
+    """间接法恒等式的核对结果。"""
+
+    #: 净利润 + Σ调节项 − 经营活动产生的现金流量净额
+    diff: float | None = None
+    #: 认到的调节项个数
+    items: int = 0
+    net_profit: float | None = None
+    cfo: float | None = None
+
+    @property
+    def checked(self) -> bool:
+        return self.diff is not None and bool(self.cfo)
+
+    @property
+    def ok(self) -> bool:
+        if not self.checked:
+            return False
+        assert self.cfo is not None and self.diff is not None
+        return abs(self.diff) <= max(1.0, abs(self.cfo) * _RECON_TOL_REL)
+
+
+def reconcile_indirect(text: str) -> IndirectReconcile:
+    """用报表**自己的恒等式**反查数字有没有被 OCR 读错。
+
+    ## 为什么需要它（实测）
+
+    有一类错，形状校验永远抓不到：`1,234,567,890.12` 被读成 `1,234,567.12` ——
+    它依然是一个合法金额，只是小了三个量级。实测某 104 页扫描件的折旧摊销
+    就是这么错的（不到收入的 0.1%，而它是一家矿业公司）。
+
+    抓手是补充资料自己的恒等式：
+
+        净利润 + Σ调节项（含折旧摊销）= 经营活动产生的现金流量净额
+
+    十几个数字必须**同时对**，才可能平 —— 错一个就露馅，而且**不需要知道真值**。
+    这正是"用报表内部逻辑发现 OCR 错"，比任何形状规则都硬。
+    """
+    out = IndirectReconcile()
+    net = _amount_after_multi(text, _INDIRECT_START)
+    cfo = _amount_after_multi(text, _INDIRECT_TARGET)
+    if net is None or cfo is None:
+        return out
+    total = net
+    n = 0
+    # **按位置去重**：一行挂多个前缀时（`固定资产折旧、投资性房地产折旧`），
+    # 两个前缀会取到同一个数 —— 不去重就重复计数。见 `_amount_after_pos`。
+    claimed: set[int] = set()
+    for prefix, _label in _DA_PREFIXES + _INDIRECT_ITEMS:
+        hit = _amount_after_pos(text, prefix)
+        if hit is None:
+            continue
+        v, pos = hit
+        if pos in claimed:
+            continue
+        claimed.add(pos)
+        total += v
+        n += 1
+    out.net_profit, out.cfo, out.items = net, cfo, n
+    out.diff = total - cfo
+    return out
+
+
+def extract_da(doc: ip.PdfDocument) -> DepreciationAmortisation:
+    """从补充资料里抽折旧摊销。
+
+    ## 只认**调节段里**的那一行
+
+    折旧摊销在年报里出现很多次（管理费用明细、固定资产附注…），
+    但**只有间接法调节段里的那一行是「本期计提的 D&A 总额」**。
+
+    实测某白酒公司第 109 页的「管理费用明细」里也有 `固定资产折旧费用 659,934,804.32`，
+    那只是**计入管理费用的那部分**，不是全部。拿它当 D&A 会严重低估
+    （真实的固定资产折旧是 1,893,338,311.91），**而且不会报错**。
+
+    所以：先定位调节段，只在调节段那几页里找。
+    """
+    out = DepreciationAmortisation()
+    pages = find_reconciliation_pages(doc)
+    if not pages:
+        out.note = "全文找不到「将净利润调节为经营活动现金流量」调节段"
+        return out
+    # **标记页 + 它后面仍在讲同一段的页** —— 明细常在下一页（实测踩到）。
+    pages = _expand_recon_window(pages, doc)
+    out.pages = pages
+
+    # **按页码查表，不要拿页码当索引。** `doc.pages[n-1]` 只在页码
+    # 从 1 连续编号时成立 —— 实测（假文档 + 未来可能的非连续页码）
+    # 会直接 IndexError，把「取不到数」变成「崩」。
+    by_number = {pg.number: pg for pg in doc.pages}
+
+    for n in pages:
+        pg = by_number.get(n)
+        if pg is None:
+            continue
+        text = pg.text
+        # **按数字的位置去重。** 源文里有一行挂三个标签的写法：
+        #     固定资产折旧、油气资产折耗、生产性生物资产折旧 1,893,338,311.91
+        # 三个前缀都会去取它后面第一个金额，取到同一个数 —— 重复计数，
+        # 实测把某白酒公司的 D&A 从 22.6 亿算成 41.5 亿（虚增近一倍），而且不报错。
+        claimed: set[int] = set()
+        for prefix, label in _DA_PREFIXES:
+            idx = text.find(prefix)
+            if idx < 0:
+                continue
+            after = text[idx + len(prefix):]
+            m = _AMOUNT.search(after)
+            if not m:
+                continue
+            pos = idx + len(prefix) + m.start()
+            if pos in claimed:
+                continue
+            v = _to_number(m.group(0))
+            if v is None or v == 0:
+                continue
+            claimed.add(pos)
+            if label in out.components:
+                continue
+            out.components[label] = v
+            snippet = (prefix + after[:m.end()]).replace("\n", " ")
+            out.evidence.append(f"第{n}页: {snippet[:90]}")
+
+    # **页面内勾稽**：用间接法恒等式反查这一段数字有没有被读错。
+    # 十几个数必须同时对才可能平 —— 错一个就露馅，而且不需要知道真值。
+    window = "\n".join((by_number[n].text or "") for n in pages if n in by_number)
+    rec = reconcile_indirect(window)
+    out.reconcile = rec
+    if rec.checked and not rec.ok:
+        out.note = ("附注调节段不平（间接法恒等式对不上）—— "
+                    "这一段数字很可能被 OCR 读错，请人工核对后再用")
+    if not out.components and not out.note:
+        out.note = f"找到调节段（第 {pages} 页）但没解析出折旧摊销行"
+    return out

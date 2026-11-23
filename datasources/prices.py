@@ -1,0 +1,696 @@
+"""价格数据源 —— 东方财富历史日线。
+
+## 为什么用"指定日期的收盘价"而不是实时报价
+
+实测发现东财的实时报价端点（`push2`）**间歇性返回空响应，连打 6 次全失败**，
+而历史日线端点（`push2his`）稳定可用。
+
+**但即使实时报价能用，也不该用它做估值。** 实时价是个陷阱：
+
+> 你会在一个周二下午，把今天的股价配上去年 12 月 31 日的资产负债表，
+> 然后把这个数写进估值报告。
+
+估值要的是「**基准日**的市值」，不是「现在的市值」。
+所以这个模块的接口是按日期取价，不提供 `current_price()`。
+
+## 复权：估值要用不复权价
+
+| fqt | 含义 | 用途 |
+|---|---|---|
+| 0 | **不复权**（真实成交价） | ✅ 算市值 —— 配对应日期的股本才是对的 |
+| 1 | 前复权 | 算收益率、技术指标 |
+| 2 | 后复权 | 长期收益率 |
+
+**市值 = 价格 × 股本，两者必须是同一时点、同一口径。**
+用前复权价配当期股本，除权那天起就会算错。
+
+## 市场前缀：A 股港股是确定的，美股必须探测
+
+| 市场 | 前缀 | 依据 |
+|---|---|---|
+| `sh` 沪市 | `1.` | 实测 |
+| `sz` 深市 / 创业板 | `0.` | 实测 |
+| `hk` 港股 | `116.` | 实测 |
+| `us` 美股 | **不确定** | ↓ 见下 |
+
+美股前缀看起来像"105=纳斯达克、106=纽交所"，但**这条规则不成立**：
+
+```
+AAPL MSFT GOOGL NVDA AMZN META TSLA   → 105   （都是纳斯达克）
+ORCL JPM KO DIS BA CAT V XOM PFE T    → 106   （都是纽交所）
+WMT                                    → 105   ← 纽交所，但走 105
+SPY                                    → 107   （ETF）
+```
+
+沃尔玛是纽交所上市的，却挂在 105 下。所以**不能靠映射表猜**，
+只能按 105 → 106 → 107 顺序探测，命中的记下来。
+
+**探测结果会缓存**，所以每个 ticker 只多花一次请求。
+
+## 公开接口按 (市场, 代码) 而不是 secid
+
+`close_on("us", "ORCL", "2025-12-31")` —— 调用方不需要知道前缀是什么。
+前缀是这个数据源的实现细节，不该泄漏出去。
+"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import random
+import time
+import urllib.parse
+from dataclasses import dataclass
+from pathlib import Path
+
+import net
+
+BASE = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+
+# 确定的市场前缀
+MARKET_PREFIX = {
+    "sh": "1",       # 沪市主板 / 科创板
+    "sz": "0",       # 深市主板 / 创业板
+    "hk": "116",     # 港股
+}
+
+# 美股要探测的顺序。105=纳斯达克、106=纽交所、107=ETF，
+# 但 WMT 走 105 说明规则不严，只能按顺序试。
+US_PREFIXES = ("105", "106", "107")
+
+USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+
+#: 请求间隔（秒）。实测：4 次/秒时东财会**偶发掐连接**（同一次会话里同一支票
+#: 一个请求失败、下一个成功），降到 2.5 次/秒后明显变稳。
+#: 代价可接受：取 3 家同行约 6–9 个请求，合计 3–4 秒（前缀还有缓存）。
+_MIN_INTERVAL = 0.4
+
+#: 失败后的等待（秒）—— **指数退避 + 抖动**。
+#: 抖动是必要的：多个请求同时被限流时，固定间隔会让它们**一起**回来再一起撞墙。
+_RETRY_WAITS = (0.6, 1.5, 3.2)
+_last_call = [0.0]
+
+CACHE_DIR = Path(__file__).resolve().parent.parent / "cache" / "prices"
+CACHE_TTL = 6 * 3600
+_PREFIX_CACHE = CACHE_DIR / "us_prefix.json"
+
+
+class PriceError(RuntimeError):
+    pass
+
+
+@dataclass
+class PriceBar:
+    """一个交易日的收盘价。"""
+
+    date: str
+    close: float
+    secid: str
+    adjust: int
+
+    @property
+    def source(self) -> str:
+        """这个价从哪来（东财 / 新浪 / 腾讯）。
+
+        出处必须能追溯 —— 同一天、不同源的收盘价理论上一致，但**来源本身**
+        是结论的一部分：改天有人问"这个市值是哪来的"，要答得出来。
+        东财命中时 `secid` 是 `1.600519`，退路命中时是 `新浪:600519`。
+        """
+        return self.secid.split(":", 1)[0] if ":" in self.secid else "东方财富"
+
+    def __str__(self) -> str:
+        return f"{self.date}  {self.close:,.2f}"
+
+
+def _throttle() -> None:
+    delta = time.time() - _last_call[0]
+    if delta < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - delta)
+    _last_call[0] = time.time()
+
+
+def _load_prefix_cache() -> dict[str, str]:
+    try:
+        return json.loads(_PREFIX_CACHE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_prefix_cache(cache: dict[str, str]) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _PREFIX_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass  # 缓存写不了不影响功能
+
+
+def resolve_secid(market: str, code: str) -> str:
+    """市场 + 代码 → 东财 secid。
+
+    A 股和港股是确定的前缀。**美股只返回首选（105）**，真正的探测在
+    `daily_closes` / `close_on` 内部做 —— 那里才知道哪个前缀有数据。
+
+    想单独拿到可用的 secid，用 `probe_secid()`。
+    """
+    key = market.strip().lower()
+    c = str(code).strip().upper()
+    if not c:
+        raise PriceError("代码不能为空")
+    if key in MARKET_PREFIX:
+        return f"{MARKET_PREFIX[key]}.{c}"
+    if key == "us":
+        cached = _load_prefix_cache().get(c)
+        return f"{cached or US_PREFIXES[0]}.{c}"
+    raise PriceError(
+        f"不认识的市场：{market!r}（用 sh / sz / us / hk）"
+    )
+
+
+def _candidate_secids(market: str, code: str) -> list[str]:
+    key = market.strip().lower()
+    c = str(code).strip().upper()
+    if key == "us":
+        cache = _load_prefix_cache()
+        if c in cache:
+            # 命中缓存的前缀放最前，其余按顺序兜底
+            rest = [p for p in US_PREFIXES if p != cache[c]]
+            return [f"{cache[c]}.{c}"] + [f"{p}.{c}" for p in rest]
+        return [f"{p}.{c}" for p in US_PREFIXES]
+    return [resolve_secid(market, code)]
+
+
+# ---------------------------------------------------------------------------
+# 股数（算市值用）—— **需要按次授权**
+#
+# 市值 = 基准日收盘价 × 股数。价格上面已经有了，股数在这里取。
+#
+# 用户 2026-09-29 拍板"先开"，但同时要求：**新主机去取数要用户的同意**。
+# 所以这两个主机列在 `net.CONSENT_HOSTS` 里 —— 这里**不用自己判权限**，
+# 没带授权时 `net.guarded_get` 会抛 `HostConsentRequired`，
+# 由调用方（Web 层）把它变成一句"要不要同意"的问话。
+# ---------------------------------------------------------------------------
+
+QUOTE_BASE = "https://push2.eastmoney.com/api/qt/stock/get"
+TX_QUOTE_BASE = "https://qt.gtimg.cn/q="
+
+#: 诚实的自家 UA —— 腾讯那边实测三种 UA 都通，那就用**说明自己是谁**的那个，
+#: 不伪装浏览器（伪装是给"只能靠伪装才通"的主机用的，这里不需要）。
+UA = "FreeAnalyst/0.42 (+https://github.com/newchapterventures/freeanalyst)"
+
+#: 腾讯盘口 payload 的字段序号（**已用已知值反证**，不是猜的）：
+#:     序号 3  = 现价
+#:     序号 44 = 总市值（亿元）   ← 45 是流通市值，同一位置附近
+#: 反证方法：拿 600519 试，44 × 1e8 ÷ 3 = 1,250,081,743 股，
+#: 与东财 f84 给的 1,250,081,601 股 相差 0.0001% —— 对上了才算验过。
+TX_IDX_PRICE = 3
+TX_IDX_MARKET_CAP = 44
+TX_CAP_UNIT = 1e8
+
+
+@dataclass
+class Shares:
+    """股数 + 它是怎么来的（依据要能追溯，跟价格那边一个规矩）。"""
+
+    code: str
+    shares: float
+    source: str
+    note: str
+
+    def __str__(self) -> str:
+        return f"{self.code}：{self.shares:,.0f} 股（{self.source}）"
+
+
+def market_of_code(code: str) -> str | None:
+    """六位 A 股代码 → `sh` / `sz`。认不出来返回 None（**不猜**）。
+
+    按**号段**判，不用"6 开头就是沪市"那种写法 —— 号段是交易所公布的，
+    而这种粗规则在边缘上会错，错了还不容易发现：
+
+        沪市  600 / 601 / 603 / 605（主板）· 688（科创板）· 689（存托凭证）
+        深市  000 / 001 / 002 / 003（主板）· 300 / 301（创业板）
+
+    北交所（8xx / 4xx）不在其中 —— 那边的股数/行情口径都没验过，
+    宁可返回 None 让上层如实报"不支持"，也不要猜一个市场出来。
+    """
+    c = str(code).strip()
+    if not (len(c) == 6 and c.isdigit()):
+        return None
+    if c.startswith(("600", "601", "603", "605", "688", "689")):
+        return "sh"
+    if c.startswith(("000", "001", "002", "003", "300", "301")):
+        return "sz"
+    return None
+
+
+def _shares_from_tx(market: str, code: str) -> Shares:
+    """腾讯盘口：总市值 ÷ 现价 = 股数。
+
+    ## 为什么主力是它，而不是东财
+    实测（2026-09-29）：`push2.eastmoney.com` 从 urllib **一律拒连**
+    （三种 UA 全是 `RemoteDisconnected`；同一时刻 curl 却能通）——
+    那是连接层的过滤，客户端改 UA 治不了。而腾讯三种 UA 全通。
+    **所以能用的那个当主力，不能用的留作退路并写明预期。**
+    """
+    url = f"{TX_QUOTE_BASE}{market}{code}"
+    _throttle()
+    raw = net.guarded_get(
+        url,
+        net.PublicQuery({"code": f"{market}{code}"}, purpose="A 股总股本（算市值用）"),
+        timeout=15,
+        headers={"User-Agent": UA},
+    )
+    text = raw.decode("gbk", "replace")
+    if '"' not in text:
+        raise PriceError(f"腾讯盘口返回格式不认识（{code}）")
+    parts = text.split('"')[1].split("~")
+    if len(parts) <= TX_IDX_MARKET_CAP:
+        raise PriceError(
+            f"腾讯盘口字段不够（{code}）：拿到 {len(parts)} 段，"
+            f"需要至少 {TX_IDX_MARKET_CAP + 1} 段。**字段位置可能变了，别硬算。**"
+        )
+    try:
+        price = float(parts[TX_IDX_PRICE])
+        cap = float(parts[TX_IDX_MARKET_CAP])
+    except ValueError as exc:
+        raise PriceError(f"腾讯盘口的现价/总市值不是数字（{code}）：{exc}") from exc
+    if price <= 0 or cap <= 0:
+        raise PriceError(f"腾讯盘口的现价或总市值为 0（{code}）—— 不拿它算股数")
+
+    shares = cap * TX_CAP_UNIT / price
+    return Shares(
+        code=code,
+        shares=shares,
+        source="腾讯盘口",
+        note=(f"{code}：总市值 ÷ 现价 = {shares:,.0f} 股"
+              f"（取自腾讯盘口当日快照，**非基准日当日**）"),
+    )
+
+
+def _shares_from_em(market: str, code: str) -> Shares:
+    """东财盘口 f84（退路）。实测从 urllib 基本连不上，留着备用。"""
+    secid = resolve_secid(market, code)
+    url = f"{QUOTE_BASE}?{urllib.parse.urlencode({'secid': secid, 'fields': 'f57,f84'})}"
+    _throttle()
+    raw = net.guarded_get(
+        url,
+        net.PublicQuery({"secid": secid}, purpose="A 股总股本（算市值用）"),
+        timeout=15,
+        headers={"User-Agent": UA},
+    )
+    payload = json.loads(raw.decode("utf-8", "replace"))
+    total = (payload.get("data") or {}).get("f84")
+    if not total:
+        raise PriceError(
+            f"东财盘口没给总股本（{secid}）—— 返回里没有 f84。"
+            f"**不拿别的字段充**：宁可报缺，也不要一个来路不明的股数。"
+        )
+    return Shares(
+        code=code,
+        shares=float(total),
+        source="东方财富盘口",
+        note=f"{code}：总股本 {float(total):,.0f} 股（取自东方财富盘口，非基准日当日）",
+    )
+
+
+def shares_outstanding(market: str, code: str) -> Shares:
+    """取**总股本**（股）。主力腾讯盘口，退路东财盘口。
+
+    ## 口径（必须说清，不然会出"看不见的错"）
+    这是**当前**的股本，不是"基准日那天的股本"。股本变动很慢（增发 / 回购才变），
+    多数情况下能用 —— 但不是一个时点，`note` 里写明取自哪一天，让看的人自己判断。
+
+    ## 为什么会抛 `HostConsentRequired`
+    这两个主机都在按次授权名单里。没带用户同意就抛 —— 这**不是失败**，
+    是"在等一次点头"，调用方要把原样往上抛（**别被 except 吞掉**）。
+    """
+    key = market.strip().lower()
+    c = str(code).strip().upper()
+    if key not in ("sh", "sz"):
+        raise PriceError(
+            f"股数目前只接 A 股（sh / sz），收到 {market!r}。"
+            f"港股和美股的股数来源不同，还没接。"
+        )
+
+    errs: list[str] = []
+    for name, fn in (("腾讯盘口", _shares_from_tx), ("东方财富盘口", _shares_from_em)):
+        try:
+            return fn(key, c)
+        except net.HostConsentRequired:
+            raise           # "在等一次点头"不是失败，原样往上抛
+        except Exception as e:                          # noqa: BLE001
+            errs.append(f"{name}：{type(e).__name__}: {e}")
+
+    raise PriceError(
+        f"{c} 的股数两个源都没取到。\n  " + "\n  ".join(errs) +
+        "\n（**不拿别的数充**：宁可报缺，也不要一个来路不明的股数。"
+        "东财那条退路实测对 urllib 一律拒连，成功率本来就低。）"
+    )
+
+
+def _fetch_rows(secid: str, beg: str, end: str, adjust: int) -> list[str] | None:
+    """取原始 kline 行。**没有数据返回 None，区别于空列表。**
+
+    东财用 `{"rc":100, "data":null}` 表示"这个 secid 不存在"，
+    用空 klines 表示"存在但没有该区间的数据"。两种情况要分开处理。
+
+    ## 连接会被掐断，而且掐断时不给任何响应
+
+    实测：查一个不存在的代码（`1.999999`），东财**直接关闭连接**，
+    客户端收到 `RemoteDisconnected`，和 curl 的 exit 52（Empty reply）是同一回事。
+
+    这带来一个**危险的歧义**：拿不到数据可能是
+      (a) 代码不存在  (b) 网络断了  (c) 被限流
+
+    **所以这里不能静默返回"无数据"。** 那会让用户以为"这家公司没有价格数据"，
+    而实际是网络问题 —— 结果是一个悄悄缺了几家公司的可比集合。
+
+    处理方式：重试三次；仍然断开就抛错，并把三种可能讲清楚。
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = urllib.parse.quote(f"{secid}_{beg}_{end}_{adjust}", safe="")
+    path = CACHE_DIR / f"{key}.json"
+
+    if path.exists() and (time.time() - path.stat().st_mtime) < CACHE_TTL:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            pass
+
+    params = {
+        "secid": secid,
+        "klt": "101",          # 日线
+        "fqt": str(adjust),
+        "beg": beg.replace("-", ""),
+        "end": end.replace("-", ""),
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56",   # 日期,开,收,高,低,量
+    }
+    url = f"{BASE}?{urllib.parse.urlencode(params)}"
+
+    raw: bytes | None = None
+    attempts = len(_RETRY_WAITS) + 1
+    for attempt in range(attempts):
+        _throttle()
+        try:
+            raw = net.guarded_get(
+                url,
+                net.PublicQuery({"secid": secid, "beg": beg, "end": end},
+                                purpose="行情日线"),
+                timeout=30,
+                headers={"User-Agent": USER_AGENT},
+            )
+            break
+        except (OSError, http.client.HTTPException) as e:
+            if attempt >= len(_RETRY_WAITS):
+                raise PriceError(
+                    f"查询 {secid} 时东财断开了连接，重试 {attempts} 次都没成功。\n"
+                    f"三种可能，请核实是哪一种：\n"
+                    f"  1. 这个代码在东财不存在（实测不存在的代码会被直接掐连接）\n"
+                    f"  2. 网络问题\n"
+                    f"  3. 请求被限流（当前限速 {1 / _MIN_INTERVAL:.1f} 次/秒）\n\n"
+                    f"**不把它当成「没有价格数据」处理** —— 那会悄悄漏掉可比公司。"
+                ) from e
+            wait = _RETRY_WAITS[attempt]
+            # 抖动：±30%，避免几个请求退避后**同时**回来再一起撞限流
+            time.sleep(wait * (0.85 + 0.3 * random.random()))
+    if raw is None:
+        return None
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise PriceError(f"东财返回了无法解析的内容（{e}）。端点可能改了。") from e
+
+    rows = (payload.get("data") or {}).get("klines")
+    if not rows:
+        return None
+    path.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 退路：单一数据源不该是唯一依赖
+# ---------------------------------------------------------------------------
+#
+# ★ 为什么要这一节（实测踩到）：东财会**间歇性拒连** —— 实测中出现过
+#   "同一分钟 curl 经代理/直连都拿到 200，而模块的请求全部失败、几分钟后又都通"。
+#   客户端退避再多也治不了源头拒连。而东财是**非官方**接口，没有可用性承诺。
+#
+# 三级顺序：东财（主）→ 新浪 → 腾讯。三家都给出「按日期的日线」，
+# **都按日期取、都不给"最新价"** —— 这一点比"谁快"重要得多。
+#
+# 实测（2026-09-29）：
+#   新浪 A 股  getKLineData?symbol=sh600519&scale=240&ma=no&datalen=N → [{day,open,high,low,close,volume}]
+#   腾讯 日线  fqkline/get?param=sh600519,day,<起>,<止>,<条数>,   → day=[[日期,开,收,高,低,量], …]
+#              港股 hk00700 ✓；美股**必须带交易所后缀**（usAAPL.OQ / usAAPL.N）
+#   新浪 不支持美股（接口不一样）→ 美股只走东财 + 腾讯。
+
+SINA = "新浪"
+TENCENT = "腾讯"
+EM = "东方财富"
+
+#: 腾讯美股后缀 —— 实测必须带，否则取不到。只试一次就缓存（和东财前缀探测同一个做法）。
+_TX_US_SUFFIXES = (".OQ", ".N")
+_TX_US_CACHE = CACHE_DIR / "tx_us_suffix.json"
+
+
+def _sina_symbol(market: str, code: str) -> str:
+    """新浪的代码写法。**美股不支持** —— 返回空串表示这条路走不通。"""
+    m = (market or "").strip().lower()
+    c = str(code).strip().upper()
+    if m in ("sh", "sz"):
+        return f"{m}{c}"
+    if m == "hk":
+        return f"hk{c.zfill(5)}"
+    return ""
+
+
+def _cache_path(name: str) -> Path:
+    return CACHE_DIR / f"{name}.json"
+
+
+def _cached_rows(name: str) -> list[str] | None:
+    p = _cache_path(name)
+    if p.exists() and (time.time() - p.stat().st_mtime) < CACHE_TTL:
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _save_rows(name: str, rows: list[str]) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path(name).write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass          # 缓存写不了不影响功能
+
+
+def _get_json(url: str, purpose: str, what: str) -> object | None:
+    """走项目自己的出网闸取一次 + 退避重试。**失败抛错，不返回"没有数据"。**"""
+    attempts = len(_RETRY_WAITS) + 1
+    for attempt in range(attempts):
+        _throttle()
+        try:
+            raw = net.guarded_get(
+                url, net.PublicQuery({"what": what}, purpose=purpose),
+                timeout=30, headers={"User-Agent": USER_AGENT},
+            )
+            return json.loads(raw.decode("utf-8"))
+        except (OSError, http.client.HTTPException, UnicodeDecodeError,
+                json.JSONDecodeError) as e:
+            if attempt >= len(_RETRY_WAITS):
+                raise PriceError(
+                    f"{purpose}失败（{type(e).__name__}）：{what}。"
+                    f"**这不是「没有价格数据」** —— 换一个源再试是调用方该做的事。"
+                ) from e
+            wait = _RETRY_WAITS[attempt]
+            time.sleep(wait * (0.85 + 0.3 * random.random()))
+    return None
+
+
+def _rows_sina(market: str, code: str, beg: str, end: str) -> list[str]:
+    """新浪日线 → **整理成和东财一样的行**（日期,开,收,高,低,量），后面的解析零改动复用。"""
+    sym = _sina_symbol(market, code)
+    if not sym:
+        return []
+    name = f"sina_{sym}_{beg}_{end}"
+    hit = _cached_rows(name)
+    if hit is not None:
+        return hit
+    from datetime import date
+    # 新浪按"最近 N 条"给，不给区间 → 按起始日到今天估一个够用的条数（交易日约 5/7）。
+    try:
+        days = max(30, (date.today() - date.fromisoformat(beg)).days * 5 // 7 + 15)
+    except ValueError:
+        days = 300
+    url = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+           f"CN_MarketData.getKLineData?symbol={sym}&scale=240&ma=no&datalen={days}")
+    data = _get_json(url, "行情日线", f"{sym} {beg}~{end}")
+    if not isinstance(data, list):
+        return []
+    rows = [f"{r['day']},{r['open']},{r['close']},{r['high']},{r['low']},{r.get('volume', 0)}"
+            for r in data if isinstance(r, dict) and r.get("day") and r.get("close")]
+    rows = [r for r in rows if beg <= r.split(",")[0] <= end]
+    if rows:
+        _save_rows(name, rows)
+    return rows
+
+
+def _tx_symbols(market: str, code: str) -> list[str]:
+    """腾讯的代码写法。**美股要带交易所后缀**，所以要探测（结果缓存）。"""
+    m = (market or "").strip().lower()
+    c = str(code).strip().upper()
+    if m in ("sh", "sz"):
+        return [f"{m}{c}"]
+    if m == "hk":
+        return [f"hk{c.zfill(5)}"]
+    if m == "us":
+        try:
+            cached = json.loads(_TX_US_CACHE.read_text(encoding="utf-8"))
+            if cached.get(c):
+                return [f"us{c}{cached[c]}"]
+        except (OSError, json.JSONDecodeError):
+            pass
+        return [f"us{c}{s}" for s in _TX_US_SUFFIXES]
+    return []
+
+
+def _rows_tencent(market: str, code: str, beg: str, end: str) -> list[str]:
+    """腾讯日线 → 同样整理成东财那套行。**第一个能出数的后缀会记进缓存。**"""
+    for sym in _tx_symbols(market, code):
+        name = f"tx_{sym}_{beg}_{end}"
+        hit = _cached_rows(name)
+        if hit is not None:
+            return hit
+        url = ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?"
+               f"param={sym},day,{beg},{end},400,")
+        try:
+            data = _get_json(url, "行情日线", f"{sym} {beg}~{end}")
+        except PriceError:
+            continue                      # 这一个后缀不行，试下一个
+        node = ((data or {}).get("data") or {}).get(sym) or {}
+        bars = node.get("day") or node.get("qfqday") or []
+        rows = []
+        for b in bars:
+            if isinstance(b, list) and len(b) >= 6:
+                # [日期, 开, 收, 高, 低, 量, (港股还跟着公司行动信息)]
+                rows.append(f"{b[0]},{b[1]},{b[2]},{b[3]},{b[4]},{b[5]}")
+        if rows:
+            _save_rows(name, rows)
+            if (market or "").strip().lower() == "us":
+                try:
+                    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+                    _TX_US_CACHE.write_text(json.dumps({str(code).upper(): sym[len("us") + len(str(code)):]},
+                                                       ensure_ascii=False), encoding="utf-8")
+                except OSError:
+                    pass
+            return rows
+    return []
+
+
+def _fetch(
+    market: str, code: str, beg: str, end: str, adjust: int
+) -> tuple[list[str], str] | tuple[None, None]:
+    """按候选前缀依次探测东财；**东财没给就换源**（新浪 → 腾讯）。
+
+    返回 `(原始行, 命中的键)`。命中的键在东财时是 secid，在退路时是 `源名:代码` ——
+    调用方据此知道这个价**从哪来**（出处要能追溯）。
+    全试完仍然没有数据返回 `(None, None)`。
+    """
+    c = str(code).strip().upper()
+    for secid in _candidate_secids(market, code):
+        rows = _fetch_rows(secid, beg, end, adjust)
+        if rows:
+            if market.strip().lower() == "us":
+                cache = _load_prefix_cache()
+                if cache.get(c) != secid.split(".", 1)[0]:
+                    cache[c] = secid.split(".", 1)[0]
+                    _save_prefix_cache(cache)
+            return rows, secid
+    # 东财没给 —— **换源再试**（它偶发拒连，而单一非官方源不该是唯一依赖）。
+    # 注意：这里只处理"取不到"，**不改变口径** —— 退路同样是"按日期的日线"。
+    for source, fetch in ((SINA, _rows_sina), (TENCENT, _rows_tencent)):
+        try:
+            rows = fetch(market, code, beg, end)
+        except PriceError:
+            continue
+        if rows:
+            return rows, f"{source}:{code}"
+    return None, None
+
+
+def _parse_rows(rows: list[str], secid: str, adjust: int) -> list[PriceBar]:
+    out: list[PriceBar] = []
+    for line in rows:
+        parts = line.split(",")
+        if len(parts) < 3:
+            continue
+        try:
+            out.append(PriceBar(date=parts[0], close=float(parts[2]),
+                                secid=secid, adjust=adjust))
+        except ValueError:
+            continue
+    out.sort(key=lambda b: b.date)
+    return out
+
+
+def daily_closes(
+    market: str, code: str, start: str, end: str, adjust: int = 0
+) -> list[PriceBar]:
+    """一段区间的日收盘价。adjust=0 是不复权（算市值用这个）。"""
+    rows, secid = _fetch(market, code, start, end, adjust)
+    if not rows or secid is None:
+        return []
+    return _parse_rows(rows, secid, adjust)
+
+
+def close_on(
+    market: str, code: str, as_of: str, adjust: int = 0, lookback_days: int = 15
+) -> PriceBar | None:
+    """取**不晚于** as_of 的最近一个交易日收盘价。
+
+    这是估值应该用的接口：基准日是 2025-12-31，就用 2025-12-31 或之前
+    最近一个交易日的价。**不会用今天的价去配去年的报表。**
+
+    lookback 覆盖长假（春节、国庆）。找不到就返回 None ——
+    **不要回退到"最新的价"，那是另一种口径。**
+    """
+    from datetime import date, timedelta
+
+    try:
+        end_d = date.fromisoformat(as_of)
+    except ValueError as e:
+        raise PriceError(f"基准日格式必须是 YYYY-MM-DD，收到 {as_of!r}") from e
+
+    start_d = end_d - timedelta(days=lookback_days)
+    rows, secid = _fetch(market, code, start_d.isoformat(), end_d.isoformat(), adjust)
+    if not rows or secid is None:
+        return None
+    eligible = [b for b in _parse_rows(rows, secid, adjust) if b.date <= as_of]
+    return eligible[-1] if eligible else None
+
+
+def probe_secid(market: str, code: str) -> str | None:
+    """联网探测出这个代码真正可用的 secid。找不到返回 None。"""
+    from datetime import date, timedelta
+
+    end_d = date.today()
+    start_d = end_d - timedelta(days=10)
+    rows, secid = _fetch(market, code, start_d.isoformat(), end_d.isoformat(), 0)
+    return secid if rows else None
+
+
+def latest_close(market: str, code: str, adjust: int = 0, days_back: int = 20) -> PriceBar | None:
+    """最近一个交易日的收盘价。
+
+    **这个函数是给"看现在的行情"用的，不是给估值用的。**
+    估值请用 close_on(market, code, 基准日)。
+    """
+    from datetime import date, timedelta
+
+    end_d = date.today()
+    start_d = end_d - timedelta(days=days_back)
+    bars = daily_closes(market, code, start_d.isoformat(), end_d.isoformat(), adjust)
+    return bars[-1] if bars else None

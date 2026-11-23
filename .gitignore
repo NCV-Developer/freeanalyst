@@ -1,0 +1,49 @@
+# 私有资产——永不进 git
+root/
+index/
+private/
+cache/
+out/
+audits/*.jsonl
+
+# 评测跑分产物
+#
+# **模型质量评测的原始结果要进仓库** —— 它是对外主张的证据
+# （README 里写了「8.9GB 的 gemma3 打败 18GB 的 qwen3」，
+# 别人应该能翻到原始答案自己核）。
+# 但那些是临时对比、看一眼就删的，不进。
+bench/results-baseline.json
+bench/results-*-rescored.json
+
+# 常见的机密材料类型（防止误提交）
+#
+# **例外**：corpus/test-*.pdf 是合成的测试材料（由同名 .html 用浏览器渲染），
+# 不含任何真实交易信息，测试要用，必须进仓库。
+*.pdf
+*.docx
+*.xlsx
+*.pptx
+*.csv
+!corpus/test-*.pdf
+
+# 真实的尽调材料不进仓库
+#
+# **例外**：materials/fitbit-2016-10k/R2.htm / R4.htm / R8.htm
+# 是 SEC EDGAR 的公开申报文件（Fitbit FY2016 10-K 的三张表），
+# 用作 HTML 抽取的测试材料。约 270KB，不含任何机密信息。
+# 其余下载文件（主文档 2.6MB、其余 R 文件）不进。
+materials/**
+!materials/fitbit-2016-10k/
+!materials/fitbit-2016-10k/R2.htm
+!materials/fitbit-2016-10k/R4.htm
+!materials/fitbit-2016-10k/R8.htm
+
+# 系统与缓存
+__pycache__/
+.DS_Store
+*.pyc
+.env
+.venv/
+
+# 保密：标的名称清理工具本身含禁名表，不进公开仓库
+tools/scrub_names.py

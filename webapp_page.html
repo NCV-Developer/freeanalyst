@@ -1,0 +1,2172 @@
+<!DOCTYPE html>
+<!--
+  FreeAnalyst 本地估值向导 —— 页面正文。
+  **这个文件既是线上那一页，也是设计稿**：webapp.py 直接读它、不改一个字，
+  所以不存在「稿子和实现长得不一样」。
+
+  ## 文案规范（正式金融用语，不要口语）
+  统一用词：材料（materials）/ 标的（target）/ 报表识别（extraction）/
+  勾稽校验（reconciliation）/ 口径（basis）/ 假设（assumptions）/ 结论（conclusion）。
+  **不要**出现"丢材料""认材料""出报告"这类口语 —— 这是给专业读者看的界面。
+
+  ## 双语
+  静态文案走 `data-i18n` + 词表；JS 动态文案走 `t('key')`。
+  手动切换（右上角），选择记在 localStorage。
+  **已知限制（页面上照实标注）**：服务端产出的文本 —— 报表标签、勾稽项名称、
+  假设清单的条目与报告正文 —— 目前只有中文。要真双语得在引擎层加词表，那是下一步。
+
+  ## 配色
+  青绿 #00E5A0 = 机器已完成并通过的　琥珀 #FFB000 = 需要人决定的　洋红 #FF2E63 = 异常
+-->
+<html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FreeAnalyst · 本地估值向导</title>
+<!-- 标签页图标：极简算盘（28 个方块·上金下银·一颗红），内联成 data URI -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 19 33' shape-rendering='crispEdges'%3E%3Cg fill='%23E9B949'%3E%3Crect x='2' y='2' width='3' height='3'/%3E%3Crect x='6' y='2' width='3' height='3'/%3E%3Crect x='10' y='2' width='3' height='3'/%3E%3Crect x='14' y='2' width='3' height='3'/%3E%3Crect x='6' y='6' width='3' height='3'/%3E%3Crect x='10' y='6' width='3' height='3'/%3E%3Crect x='14' y='6' width='3' height='3'/%3E%3C/g%3E%3Cg fill='%23C9D2DC'%3E%3Crect x='2' y='12' width='3' height='3'/%3E%3Crect x='6' y='12' width='3' height='3'/%3E%3Crect x='10' y='12' width='3' height='3'/%3E%3Crect x='14' y='12' width='3' height='3'/%3E%3Crect x='2' y='16' width='3' height='3'/%3E%3Crect x='6' y='16' width='3' height='3'/%3E%3Crect x='10' y='16' width='3' height='3'/%3E%3Crect x='14' y='16' width='3' height='3'/%3E%3Crect x='2' y='20' width='3' height='3'/%3E%3Crect x='6' y='20' width='3' height='3'/%3E%3Crect x='10' y='20' width='3' height='3'/%3E%3Crect x='14' y='20' width='3' height='3'/%3E%3Crect x='2' y='24' width='3' height='3'/%3E%3Crect x='6' y='24' width='3' height='3'/%3E%3Crect x='10' y='24' width='3' height='3'/%3E%3Crect x='14' y='24' width='3' height='3'/%3E%3Crect x='2' y='28' width='3' height='3'/%3E%3Crect x='6' y='28' width='3' height='3'/%3E%3Crect x='10' y='28' width='3' height='3'/%3E%3Crect x='14' y='28' width='3' height='3'/%3E%3C/g%3E%3Crect fill='%23E5484D' x='2' y='6' width='3' height='3'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#05070A; --panel:#0A0F16; --panel2:#0D141C; --line:#16212B;
+    --fg:#D7F5E9; --mut:#5F7C77; --pri:#00E5A0; --amber:#FFB000; --mag:#FF2E63;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,"Cascadia Mono","PingFang SC",monospace;
+    /* 页头算盘高度 —— 字标贴顶、署名贴底就是按这个高度撑开的。
+       **两行之间的空档 = 这个高度 − 两行字高**，所以想收紧空档就调这一个数。 */
+    --logo-h:48px;
+    /* 算盘宽度：按 SVG viewBox 的 19:33 从高度算出来，**不另写一个数**。
+       以前这里写死过 54px（38+16），后来算盘改成按高度缩放、实际宽度 27.6px，
+       标语那行就悄悄右移了 10px —— 三行没对齐，根子在这儿。 */
+    --logo-w:calc(var(--logo-h) * 19 / 33);
+    --head-gap:16px;
+    /* 字标字号（另一个旋钮：字大一点，空档也会跟着小一点） */
+    --word-size:33px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--fg); font:13px/1.65 var(--mono);
+    -webkit-font-smoothing:antialiased;
+    background-image:
+      radial-gradient(900px 420px at 12% -8%, rgba(0,229,160,.055), transparent 62%),
+      radial-gradient(700px 380px at 96% 4%, rgba(255,176,0,.035), transparent 60%),
+      linear-gradient(rgba(0,229,160,.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0,229,160,.028) 1px, transparent 1px);
+    background-size:auto,auto,34px 34px,34px 34px;
+  }
+  body::after{content:"";position:fixed;inset:0;pointer-events:none;z-index:9;
+    background:repeating-linear-gradient(180deg, rgba(255,255,255,.020) 0 1px, transparent 1px 3px);
+    mix-blend-mode:screen}
+  .wrap{max-width:1000px;margin:0 auto;padding:30px 24px 90px}
+
+  /* ── 抬头 ── */
+  .top{display:flex;gap:var(--head-gap);align-items:center;margin-bottom:8px}
+  .logo{flex:0 0 auto;transition:filter .25s ease, transform .25s ease;
+        height:var(--logo-h);width:var(--logo-w);   /* 两个值同源，改高度宽度自动跟 */
+        filter:drop-shadow(0 0 7px rgba(108,92,231,.40))}
+  .logo:hover{filter:drop-shadow(0 0 15px rgba(255,194,75,.5));transform:translateY(-1px)}
+  .logo .lg-up{fill:#E9B949}
+  .logo .lg-down{fill:#C9D2DC}
+  .logo .lg-acc{fill:#E5484D}
+  .logo:hover .lg-up{fill:#F5CB6E}
+  .logo:hover .lg-down{fill:#DDE5EC}
+  .logo:hover .lg-acc{fill:#FF6A6E}
+  .head-txt{flex:1 1 auto;align-self:stretch;      /* 撑满算盘的高度（由 logo 决定） */
+            display:flex;flex-direction:column;justify-content:space-between}
+  /* 字标：字号由 --word-size 定；line-height 压到 1 让上下两端尽量顶满 */
+  .word{font-size:var(--word-size);font-weight:700;letter-spacing:.24em;margin:0;line-height:1}
+  .word em{font-style:normal;color:var(--pri);text-shadow:0 0 12px rgba(0,229,160,.55)}
+  .tag{color:var(--mut);font-size:12px;letter-spacing:.02em}
+  /* 字标贴顶、署名贴底 —— 一上一下夹住算盘（stretch + space-between 自动得到） */
+  /* 标语那行的左缩进 = 算盘宽 + 间距（同一个算式）→ 三行左对齐是**算出来的**，不是对齐出来的 */
+  .tagline-row{margin:9px 0 18px;padding-left:calc(var(--logo-w) + var(--head-gap))}
+  .byline{color:#42565A;font-size:11px;letter-spacing:.14em}
+
+  /* ── 语言切换 ── */
+  .lang{flex:0 0 auto;display:flex;border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .lang button{background:transparent;border:0;color:var(--mut);font-family:var(--mono);
+    font-size:11.5px;letter-spacing:.06em;padding:6px 12px;cursor:pointer;transition:all .16s ease}
+  .lang button:hover{color:var(--fg)}
+  .lang button.on{color:var(--pri);background:rgba(0,229,160,.10)}
+  /* 说明文件入口：跟语言开关并排，同一套描边风格 */
+  .doclink{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;
+    border:1px solid var(--line);border-radius:2px;padding:6px 12px;
+    color:var(--mut);font-size:11.5px;letter-spacing:.06em;text-decoration:none;
+    transition:all .18s ease}
+  .doclink:hover{color:var(--pri);border-color:var(--pri);background:rgba(0,229,160,.08)}
+  .doclink::before{content:"?";color:var(--pri);font-weight:700}
+  .doclink.gear::before{content:"⚙"}                 /* 模型设置：⚙ 一眼认出来 */
+
+  /* 装饰性命令行：放进 .tagline-row 里，左沿由外层 padding 决定（自己不写缩进） */
+  .prompt{color:var(--mut);font-size:12px;margin:7px 0 0}
+  .caret{display:inline-block;width:7px;height:13px;background:var(--pri);
+         vertical-align:-2px;animation:blink 1.05s steps(1) infinite;margin-left:2px}
+  @keyframes blink{50%{opacity:0}}
+  .pills{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}
+  .pill{border:1px solid var(--line);background:var(--panel);border-radius:2px;
+        padding:4px 10px;font-size:11.5px;color:var(--mut);letter-spacing:.03em}
+  .pill.on{color:var(--pri);border-color:rgba(0,229,160,.38)}
+  .dot{display:inline-block;width:6px;height:6px;background:var(--pri);border-radius:50%;
+       margin-right:6px;vertical-align:1px;box-shadow:0 0 8px var(--pri);
+       animation:pulse 2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.30}}
+
+  /* ── 步骤条 ── */
+  .steps{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 26px}
+  .step{border:1px solid var(--line);background:var(--panel);border-radius:2px;
+        padding:6px 12px;font-size:12px;color:var(--mut);display:flex;gap:8px;align-items:center;
+        transition:color .18s ease,border-color .18s ease,box-shadow .18s ease}
+  .step .n{opacity:.75;font-weight:700}
+  .step.on{color:var(--pri);border-color:rgba(0,229,160,.42);
+           box-shadow:0 0 0 1px rgba(0,229,160,.10), 0 0 20px rgba(0,229,160,.14)}
+  .step.on .n{opacity:1}
+  .step.off{opacity:.42;border-style:dashed}
+  .step.off .n{text-decoration:line-through}
+
+  /* ── 卡片 ── */
+  .card{position:relative;background:linear-gradient(180deg,var(--panel),var(--panel2));
+        border:1px solid var(--line);border-radius:3px;padding:18px 20px;margin-bottom:14px;
+        transition:border-color .2s ease, box-shadow .2s ease}
+  .card:hover{border-color:rgba(0,229,160,.28);box-shadow:0 0 26px rgba(0,229,160,.07)}
+  .card::before,.card::after{content:"";position:absolute;width:11px;height:11px;
+        border:1px solid var(--pri);opacity:0;transition:opacity .2s ease}
+  .card::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+  .card::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+  .card:hover::before,.card:hover::after{opacity:.85}
+  .card h2{font-size:13.5px;margin:0 0 12px;letter-spacing:.04em;display:flex;
+           align-items:baseline;gap:10px;flex-wrap:wrap}
+  .card h2 .idx{color:var(--pri)}
+  .card h2 small{color:var(--mut);font-weight:400;font-size:11.5px;letter-spacing:0}
+  .card.need h2 .idx{color:var(--amber)}
+  .card.bad h2 .idx{color:var(--mag)}
+
+  input[type=text]{width:100%;background:#070C11;color:var(--fg);font-family:var(--mono);
+    font-size:12.5px;padding:10px 12px;border:1px solid var(--line);border-radius:2px;
+    transition:border-color .18s ease,box-shadow .18s ease}
+  input[type=text]::placeholder{color:#3F5450}
+  input[type=text]:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 3px rgba(0,229,160,.10)}
+  /* 能选的就别让人打字：封闭集合用下拉，建议值用可编辑下拉（datalist） */
+  select{width:100%;background:#070C11;color:var(--fg);font-family:var(--mono);
+    font-size:12px;padding:10px 12px;border:1px solid var(--line);border-radius:2px;
+    cursor:pointer;appearance:none;
+    background-image:linear-gradient(45deg,transparent 50%,var(--pri) 50%),
+                     linear-gradient(135deg,var(--pri) 50%,transparent 50%);
+    background-position:calc(100% - 16px) 18px, calc(100% - 11px) 18px;
+    background-size:5px 5px, 5px 5px;background-repeat:no-repeat}
+  select:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 3px rgba(0,229,160,.10)}
+  select option{background:#0A0F16;color:var(--fg)}
+  button.act{font-family:var(--mono);font-size:12.5px;font-weight:700;letter-spacing:.05em;
+    padding:10px 20px;border-radius:2px;cursor:pointer;transition:all .18s ease;
+    background:transparent;color:var(--pri);border:1px solid var(--pri)}
+  button.act:hover:not(:disabled){background:rgba(0,229,160,.12);box-shadow:0 0 20px rgba(0,229,160,.25)}
+  button.act:disabled{opacity:.40;cursor:default}
+  button.act.amber{color:var(--amber);border-color:var(--amber)}
+  button.act.amber:hover:not(:disabled){background:rgba(255,176,0,.13);box-shadow:0 0 20px rgba(255,176,0,.25)}
+  button.act.sm{font-size:11.5px;padding:6px 12px;font-weight:400;letter-spacing:.02em}
+  button.act.ghost{color:var(--mut);border-color:var(--line)}
+  button.act.ghost:hover:not(:disabled){color:var(--pri);border-color:var(--pri);
+        background:rgba(0,229,160,.08);box-shadow:none}
+  .pickrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:11px;
+        border:1px dashed rgba(0,229,160,.22);border-radius:3px;padding:10px 12px;
+        background:rgba(0,229,160,.035)}
+  .pickrow .label{color:var(--pri);font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+  .pickrow .hint{color:var(--mut);font-size:11.5px;line-height:1.5}
+  /* 按代码取财报 —— 折叠在「载入方式」下方，用底色分层，不用分隔线 */
+  .fetchbox{margin-top:12px;padding:13px 14px;border-radius:3px;
+        background:rgba(0,229,160,.03);border:1px solid rgba(0,229,160,.14)}
+  .fetchbox .fprow{display:flex;gap:9px;align-items:center;flex-wrap:wrap;
+        margin-bottom:9px}
+  .fetchbox .fprow:last-child{margin-bottom:0}
+  .fetchbox input,.fetchbox select{font-family:var(--mono);font-size:12.5px;
+        padding:8px 10px;border-radius:2px;background:rgba(255,255,255,.035);
+        color:var(--fg);border:1px solid rgba(0,229,160,.18);outline:none}
+  .fetchbox input{flex:1;min-width:190px}
+  .fetchbox input:focus{border-color:rgba(0,229,160,.5)}
+  .fetchbox .fphint{color:var(--mut);font-size:11.5px;line-height:1.5}
+  .fpcand{font-size:11.5px;color:var(--mut);margin-bottom:7px;line-height:1.7}
+  .fpitem{display:flex;gap:9px;align-items:flex-start;padding:7px 9px;
+        border-radius:2px;font-size:12px;line-height:1.55;cursor:pointer;
+        transition:background .18s ease}
+  .fpitem:hover{background:rgba(0,229,160,.055)}
+  .fpitem input{margin-top:2px;flex:0 0 auto;min-width:0}
+  .fpitem .t{flex:1;color:var(--fg)}
+  .fpitem .m{color:var(--mut);font-size:11px;white-space:nowrap}
+  .fpwarn{font-size:11.5px;color:#e8b84b;line-height:1.6;margin-top:6px}
+  /* 解析诊断 —— 失败时照实说清卡在哪一步，不用分隔线，用底色分层 */
+  .diagbox{margin-top:10px;padding:11px 13px;border-radius:3px;font-size:12px;
+        line-height:1.7;background:rgba(255,255,255,.028);
+        border-left:2px solid rgba(232,184,75,.55)}
+  .diagbox.hide{display:none !important}
+  .diagbox .dghead{color:var(--fg);font-weight:600;margin-bottom:5px}
+  .diagbox .dgrow{color:var(--mut);font-size:11.5px}
+  .diagbox .dghint{color:var(--mut);font-size:11.5px;margin-top:5px;
+        padding-left:10px;border-left:1px solid rgba(255,255,255,.10)}
+  .diagbox .bad{color:#e06c6c}
+  button.pick{font-family:var(--mono);font-size:12.5px;letter-spacing:.03em;
+        padding:9px 16px;border-radius:2px;cursor:pointer;
+        background:rgba(0,229,160,.10);color:var(--pri);
+        border:1px solid rgba(0,229,160,.55);transition:all .18s ease}
+  button.pick:hover:not(:disabled){background:rgba(0,229,160,.20);
+        box-shadow:0 0 20px rgba(0,229,160,.28)}
+  button.pick:disabled{opacity:.45;cursor:default;background:transparent;
+        color:var(--mut);border-color:var(--line)}
+  .card.drop{border-color:var(--pri);
+        box-shadow:0 0 0 1px rgba(0,229,160,.25), 0 0 30px rgba(0,229,160,.16)}
+  .grid2{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:start}
+  .grid3{display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  tbody tr:nth-child(even){background:rgba(255,255,255,.014)}
+  th{color:var(--mut);font-weight:400;font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .ok{color:var(--pri)} .warn{color:var(--amber)} .bad{color:var(--mag)} .mut{color:var(--mut)}
+  .kv{color:var(--mut);font-size:12.5px;line-height:1.9}
+  .kv b{color:var(--fg);font-weight:400}
+
+  h3.grp{font-size:11px;color:var(--amber);letter-spacing:.14em;text-transform:uppercase;
+         margin:18px 0 6px;font-weight:400}
+  .q{padding:9px 0;border-bottom:1px solid var(--line);
+     display:grid;grid-template-columns:minmax(200px,260px) 1fr;gap:12px;align-items:start}
+  .q:last-child{border-bottom:0}
+  .q label{font-size:12.5px}
+  .q .hint{display:block;color:var(--mut);font-size:11px;margin-top:3px;line-height:1.5}
+  .q .hint b{color:var(--amber);font-weight:400}
+  .q input{font-size:12px}
+  /* 这个数**从哪来** —— 四类各有颜色：
+     财报（工具必须给）／财报推算（给数+请确认）／外部（由你提供）／你的判断。
+     不标，人就分不清"报表里有的"和"公司之外要我自己找的"。 */
+  .org{font-style:normal;font-size:10px;letter-spacing:.04em;padding:1px 5px;
+       border-radius:2px;margin-right:6px;border:1px solid;white-space:nowrap}
+  .org.filing{color:var(--pri);border-color:rgba(0,229,160,.45)}
+  .org.derived{color:var(--amber);border-color:rgba(255,176,0,.45)}
+  .org.external{color:var(--mag);border-color:rgba(255,46,99,.45)}
+  .org.judgment{color:var(--mut);border-color:var(--line)}
+  /* 百分比字段：% 显示在框里（默认就在），人**只填数值**。
+     提交时由引擎按 % 解读 —— 界面不自己算，也不让值裸着过去。 */
+  .pctwrap{position:relative;display:block}
+  .pctwrap input{padding-right:26px}
+  .pctsuf{position:absolute;right:10px;top:50%;transform:translateY(-50%);
+          color:var(--pri);font-size:12.5px;font-style:normal;
+          pointer-events:none;opacity:.9}
+
+  .term{border:1px solid var(--line);border-radius:3px;overflow:hidden;background:#04070A}
+  .term .bar{display:flex;align-items:center;gap:9px;padding:7px 12px;
+             background:var(--panel);border-bottom:1px solid var(--line);
+             font-size:11px;color:var(--mut);letter-spacing:.05em}
+  .term .bar .dots{display:flex;gap:5px}
+  .term .bar i{width:7px;height:7px;border-radius:50%;background:#1F2A33;display:block}
+  .term pre{margin:0;padding:15px;max-height:540px;overflow:auto;white-space:pre-wrap;
+            font-family:var(--mono);font-size:11.5px;line-height:1.62;color:#BFE9DA}
+
+  .notice{border:1px dashed rgba(255,176,0,.30);border-radius:3px;padding:11px 14px;
+          color:var(--mut);font-size:12px;margin-bottom:14px;background:rgba(255,176,0,.025)}
+  .notice b{color:var(--amber);font-weight:400}
+  .notice.issue{border-color:rgba(255,46,99,.35);background:rgba(255,46,99,.03)}
+  .notice.issue b{color:var(--mag)}
+  .notice.quiet{border-color:var(--line);background:transparent}
+  footer{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);
+         color:var(--mut);font-size:11.5px;line-height:2}
+  .verline{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+           color:var(--mut);font-size:11.5px;letter-spacing:.06em}
+  .verline b{color:var(--pri);font-weight:400}
+  footer span.ttl{color:var(--pri)}
+  /* ⚠ 这个 !important 是**故意的**，别去掉：
+     `.hide` 是"隐藏"这个动作的唯一工具类，它必须**永远赢**。
+     踩过的坑（2026-09-24，用户报"按键无效/关不掉"）：
+       .hide{display:none}          ← 第 240 行先声明
+       .onb{…display:flex}          ← 第 247 行后声明，**同优先级，后写的赢**
+     结果：全屏引导遮罩的 hide 类加了也关不掉；而 JS 那边 `onbKey()` 第一句是
+     "带 hide 就 return" —— 它以为自己是隐藏的，于是按键全部失效。
+     教训：**别让显隐依赖"规则先后"**，工具类的显示规则必须带 !important。 */
+  .hide{display:none !important}
+  .onb.hide{display:none}        /* 第二道保险：即使将来 !important 被误删，这条也赢 */
+  code{font-family:var(--mono);color:var(--amber);background:rgba(255,176,0,.07);
+       padding:1px 5px;border-radius:2px}
+
+  /* ── 首次引导：铺满屏，三屏，看完记住（localStorage）。给不看文档的人。 ──
+     科技感的做法是"用产品自己的语言"：等宽字、扫描线、四角括号、编号 01/03，
+     和卡片、终端区块同一套。不额外引入任何装饰字体或图片。 */
+  .onb{position:fixed;inset:0;z-index:50;padding:24px;
+       background:radial-gradient(820px 420px at 50% -10%, rgba(0,229,160,.10), transparent 62%),
+                  rgba(3,5,8,.94);
+       display:flex;align-items:center;justify-content:center;
+       animation:onbIn .22s ease}
+  @keyframes onbIn{from{opacity:0}to{opacity:1}}
+  .onb-box{position:relative;max-width:660px;width:100%;padding:22px 26px 20px;
+           background:linear-gradient(180deg,var(--panel),var(--panel2));
+           border:1px solid var(--line);border-radius:3px;
+           box-shadow:0 0 0 1px rgba(0,229,160,.06), 0 24px 60px rgba(0,0,0,.55),
+                      0 0 60px rgba(0,229,160,.05)}
+  /* 扫描线：和 body::after 同一手法的局部版 */
+  .onb-box::after{content:"";position:absolute;inset:0;pointer-events:none;border-radius:3px;
+       background:repeating-linear-gradient(180deg, rgba(255,255,255,.022) 0 1px, transparent 1px 3px)}
+  /* 四角括号：和 .card 悬停时那对括号同源 */
+  .onb-box::before{content:"";position:absolute;top:-1px;left:-1px;width:14px;height:14px;
+       border:1px solid var(--pri);border-right:0;border-bottom:0;opacity:.9}
+  .onb-box .br{position:absolute;bottom:-1px;right:-1px;width:14px;height:14px;
+       border:1px solid var(--pri);border-left:0;border-top:0;opacity:.9}
+  .onb-bar{display:flex;align-items:center;gap:10px;margin-bottom:16px;
+           padding-bottom:11px;border-bottom:1px solid var(--line);
+           font-size:11px;letter-spacing:.10em;text-transform:uppercase}
+  .onb-bar .cmd{color:var(--pri)}
+  .onb-bar .idx{color:var(--mut);margin-left:auto;font-variant-numeric:tabular-nums}
+  .onb-box h2{font-size:19px;margin:0 0 14px;color:var(--fg);letter-spacing:.02em;
+              display:flex;gap:10px;align-items:baseline}
+  .onb-box h2 .tick{color:var(--pri);font-size:13px}
+  .onb-box p{font-size:13px;line-height:1.78;color:#B6CFC9;margin:0 0 10px}
+  .onb-box ul{margin:8px 0 0 18px;padding:0;font-size:13px;line-height:1.85;color:#B6CFC9}
+  .onb-box b{color:var(--pri)}
+  .onb-foot{display:flex;align-items:center;gap:10px;margin-top:20px;
+            border-top:1px solid var(--line);padding-top:14px}
+  .onb-dots{display:flex;gap:5px;margin-right:auto}
+  .onb-dots i{width:26px;height:3px;background:var(--line);border-radius:2px;
+              transition:background .2s ease, box-shadow .2s ease}
+  .onb-dots i.on{background:var(--pri);box-shadow:0 0 10px rgba(0,229,160,.55)}
+  .onb-key{color:var(--mut);font-size:10.5px;letter-spacing:.06em;margin-right:4px}
+  /* 引导里的语言开关：**必须在弹层里** —— 弹层盖住了页头那个，
+     英文用户第一次打开就没法切到英文（真踩过）。 */
+  .onb-lang{display:flex;border:1px solid var(--line);border-radius:2px;overflow:hidden}
+  .onb-lang button{background:transparent;border:0;color:var(--mut);font-family:var(--mono);
+       font-size:10.5px;letter-spacing:.06em;padding:4px 9px;cursor:pointer}
+  .onb-lang button.on{color:var(--pri);background:rgba(0,229,160,.10)}
+  /* 最后一屏的两条路：整行大按钮，悬停有明确反馈（改动要看得见） */
+  #onbMode{display:flex;flex-direction:column;gap:10px;margin:18px 0 4px}
+  .modebtn{display:block;width:100%;text-align:left;padding:13px 15px;cursor:pointer;
+       background:rgba(255,255,255,.02);border:1px solid var(--line);border-radius:6px;
+       color:var(--fg);font-family:inherit;font-size:13.5px;line-height:1.5;
+       transition:border-color .15s ease, background .15s ease}
+  .modebtn:hover{border-color:var(--pri);background:rgba(0,229,160,.06)}
+</style></head><body><div class="wrap">
+
+  <!-- 首次引导（三屏）。**不写术语**：用的人是不写代码的 associate。
+       内容只讲三件事：这是什么 / 材料怎么进来 / 要不要装模型。 -->
+  <div class="onb hide" id="onb">
+    <div class="onb-box">
+      <span class="br"></span>
+      <!-- 顶栏：命令行口吻 + 页码。科技感来自产品自己的语言（等宽、编号、§），
+           不是来自装饰图。 -->
+      <div class="onb-bar">
+        <span class="cmd">$ freeanalyst --intro</span>
+        <span class="idx" id="onbIdx">01 / 03</span>
+      </div>
+      <h2><span class="tick">▸</span><span id="onbTitle"></span></h2>
+      <div id="onbBody"></div>
+      <!-- 最后一屏：**在这里选做什么**。
+           放在弹层里而不是页面顶上——页面本体已经很长，再摆一张大卡
+           只会让新用户更无从下手（2026-09-29 用户意见）。 -->
+      <div id="onbMode" class="hide">
+        <button class="modebtn" id="onbModeAppraise" onclick="onbPick('appraise')"
+                data-i18n="mode.appraise"></button>
+        <button class="modebtn" id="onbModeAnalyse" onclick="onbPick('analyse')"
+                data-i18n="mode.analyse"></button>
+      </div>
+      <div class="onb-foot">
+        <span class="onb-dots" id="onbDots"><i></i><i></i><i></i><i></i></span>
+        <span class="onb-key" data-i18n="onb.hint"></span>
+        <div class="onb-lang" role="group">
+          <button type="button" data-onblang="zh">中文</button>
+          <button type="button" data-onblang="en">EN</button>
+        </div>
+        <button class="ghost" id="onbSkip" onclick="onbSkip()"></button>
+        <button id="onbNext" onclick="onbNext()"></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="top">
+    <!-- 极简算盘：28 个方块（4 列 × 上 2 下 5），无轴无梁无框无高光。
+         上金 #E9B949、下银 #C9D2DC，红块 #E5484D 在左起第 1 列 · 上排第 2 颗。
+         **尺寸以 CSS 的 --logo-h / --logo-w 为准**；下面两个属性只是没 CSS 时的兜底，
+         所以数值要与 --logo-h 保持一致（check_ui 会核对，不一致就红）。 -->
+    <svg class="logo" width="28" height="48" viewBox="0 0 19 33" shape-rendering="crispEdges"
+         role="img" aria-label="算盘">
+      <g class="lg-up">
+        <rect x="2" y="2" width="3" height="3"/>
+        <rect x="6" y="2" width="3" height="3"/>
+        <rect x="10" y="2" width="3" height="3"/>
+        <rect x="14" y="2" width="3" height="3"/>
+        <rect x="6" y="6" width="3" height="3"/>
+        <rect x="10" y="6" width="3" height="3"/>
+        <rect x="14" y="6" width="3" height="3"/>
+      </g>
+      <g class="lg-down">
+        <rect x="2" y="12" width="3" height="3"/>
+        <rect x="6" y="12" width="3" height="3"/>
+        <rect x="10" y="12" width="3" height="3"/>
+        <rect x="14" y="12" width="3" height="3"/>
+        <rect x="2" y="16" width="3" height="3"/>
+        <rect x="6" y="16" width="3" height="3"/>
+        <rect x="10" y="16" width="3" height="3"/>
+        <rect x="14" y="16" width="3" height="3"/>
+        <rect x="2" y="20" width="3" height="3"/>
+        <rect x="6" y="20" width="3" height="3"/>
+        <rect x="10" y="20" width="3" height="3"/>
+        <rect x="14" y="20" width="3" height="3"/>
+        <rect x="2" y="24" width="3" height="3"/>
+        <rect x="6" y="24" width="3" height="3"/>
+        <rect x="10" y="24" width="3" height="3"/>
+        <rect x="14" y="24" width="3" height="3"/>
+        <rect x="2" y="28" width="3" height="3"/>
+        <rect x="6" y="28" width="3" height="3"/>
+        <rect x="10" y="28" width="3" height="3"/>
+        <rect x="14" y="28" width="3" height="3"/>
+      </g>
+      <rect class="lg-acc" x="2" y="6" width="3" height="3"/>
+    </svg>
+    <div class="head-txt">
+      <h1 class="word">FREE<em>ANALYST</em></h1>
+      <!-- 署名中英一样，所以是**静态文字**，不走词表：
+           少一层 JS 依赖 —— JS 没跑、图还没渲染完，它也在。 -->
+      <div class="byline">by New Chapter Ventures</div>
+    </div>
+    <a class="doclink" id="modeLink" href="#" onclick="onbShow(3);return false"
+       data-i18n="nav.mode"></a>
+    <a class="doclink" id="docLink" href="/doc" data-i18n="nav.doc"></a>
+    <a class="doclink gear" id="cfgLink" href="/config" data-i18n="nav.config"></a>
+    <div class="lang" role="group">
+      <button type="button" data-lang="zh">中文</button>
+      <button type="button" data-lang="en">EN</button>
+    </div>
+  </div>
+
+  <!-- 标语在 logo / 字标整块的下方整行铺开（左缩进与字标同源，见 .tagline-row） -->
+  <div class="tagline-row">
+    <!-- 静态写中文：JS 没跑也有内容（默认语言就是中文），JS 起来后再按选择的语言替换 -->
+    <div class="tag" data-i18n="tagline">本地估值向导 · 尽调材料 → 估值报告 · 全程不出网</div>
+    <!-- 这行是装饰性的命令行，与上一句的「不出网」说的是同一件事的两种说法；
+         放进同一列 → **左沿自动同源**，不用再写一份缩进（写一份就会错开） -->
+    <div class="prompt">$ freeanalyst --local --no-egress<span class="caret"></span></div>
+  </div>
+
+  <div class="pills">
+    <span class="pill on"><span class="dot"></span>LOCAL · 127.0.0.1</span>
+    <span class="pill" data-i18n="pill.egress"></span>
+    <span class="pill" data-i18n="pill.nomodel"></span>
+    <span class="pill" data-i18n="pill.arith"></span>
+    <span class="pill" data-i18n="pill.declare"></span>
+  </div>
+
+  <div class="steps">
+    <div class="step on" id="s1"><span class="n">01</span><span data-i18n="step.1"></span></div>
+    <div class="step" id="s2"><span class="n">02</span><span data-i18n="step.2"></span></div>
+    <div class="step off" id="s3"><span class="n">03</span><span data-i18n="step.3"></span></div>
+    <div class="step off" id="s4"><span class="n">04</span><span data-i18n="step.4"></span></div>
+    <div class="step" id="s5"><span class="n">05</span><span data-i18n="step.5"></span></div>
+    <div class="step" id="s6"><span class="n">06</span><span data-i18n="step.6"></span></div>
+    <!-- 07 是**另一条路**（财务分析），默认不显示；选了它才亮 -->
+    <div class="step hide" id="s7"><span class="n">07</span><span data-i18n="step.7"></span></div>
+  </div>
+
+  <div class="notice" data-i18n-html="notice.scope"></div>
+
+  <div class="notice issue hide" id="stale" data-i18n-html="stale.banner"></div>
+
+  <div class="card">
+    <h2><span class="idx">01</span><span data-i18n="s1.title"></span>
+        <small data-i18n="s1.sub"></small></h2>
+    <div class="grid2">
+      <input type="text" id="path" spellcheck="false" data-i18n-ph="s1.ph">
+      <div><button class="act" id="scanBtn" onclick="scan()" data-i18n="s1.btn"></button></div>
+    </div>
+    <div class="pickrow">
+      <span class="label" data-i18n="s1.picklabel"></span>
+      <button class="pick" id="pickDir" type="button" onclick="pick('dir')" data-i18n="s1.pickdir"></button>
+      <button class="pick" id="pickFile" type="button" onclick="pick('file')" data-i18n="s1.pickfile"></button>
+      <button class="pick" id="pickFetch" type="button" onclick="fpToggle()" data-i18n="s1.pickfetch"></button>
+      <span class="hint" data-i18n="s1.drophint"></span>
+    </div>
+
+    <!-- 按代码取公开财报 —— 折叠在「载入方式」里，不另起一张卡 -->
+    <div id="fetchPanel" class="fetchbox" hidden>
+      <div class="fprow">
+        <input type="text" id="fpQuery" spellcheck="false" data-i18n-ph="s1.fpquery">
+        <select id="fpKind">
+          <option value="annual" data-i18n="s1.fpannual"></option>
+          <option value="interim" data-i18n="s1.fpinterim"></option>
+          <option value="quarterly" data-i18n="s1.fpquarter"></option>
+        </select>
+      </div>
+      <div class="fprow">
+        <input type="text" id="fpPeriod" spellcheck="false" inputmode="numeric" data-i18n-ph="s1.fpperiod">
+        <span class="fphint" data-i18n="s1.fpperiodhint"></span>
+      </div>
+      <div class="fprow">
+        <button class="act" id="fpFindBtn" type="button" onclick="fpFind()" data-i18n="s1.fpfind"></button>
+        <button class="pick" id="fpGetBtn" type="button" onclick="fpGet()" data-i18n="s1.fpget" disabled></button>
+      </div>
+      <div id="fpMsg" class="mut" style="font-size:12px"></div>
+      <div id="fpList"></div>
+    </div>
+    <div id="scanMsg" class="mut" style="margin-top:10px;font-size:12px"></div>
+    <div id="scanDiag" class="diagbox hide"></div>
+  </div>
+
+  <div class="card hide" id="card2">
+    <h2><span class="idx">02</span><span data-i18n="s2.title"></span>
+        <small data-i18n="s2.sub"></small></h2>
+    <div id="tables"></div>
+    <div id="checks" style="margin-top:14px"></div>
+    <div id="meta" style="margin-top:14px"></div>
+    <div id="unitBox" style="margin-top:14px"></div>
+    <div id="srvNote" class="notice quiet hide" style="margin:14px 0 0" data-i18n="s2.srvnote"></div>
+  </div>
+
+  <!-- ── 07 · 财务分析（另一条路的终点）────────────────────────────────
+       **只读三张表**，不碰假设 —— 所以它跟在 card2（三张表）后面，
+       而不是跟在估值流程后面。 -->
+  <div class="card hide" id="card7">
+    <h2><span class="idx">07</span><span data-i18n="s7.title"></span>
+        <small data-i18n="s7.sub"></small></h2>
+    <div class="notice" style="margin-bottom:14px" data-i18n-html="s7.notice"></div>
+    <div><button class="act" id="anBtn" onclick="analyse()" data-i18n="s7.btn"></button></div>
+    <div id="anMsg" class="mut" style="margin-top:10px;font-size:12px"></div>
+    <div id="anOut" style="margin-top:12px"></div>
+  </div>
+
+  <div class="card hide" id="card4">
+    <h2><span class="idx">04</span><span data-i18n="s4.title"></span>
+        <small data-i18n="s4.sub"></small></h2>
+    <div class="notice" style="margin-bottom:14px" data-i18n-html="s4.notice"></div>
+    <div class="grid2">
+      <label><span data-i18n="s4.tickers"></span>
+        <input id="cTickers" placeholder="LEA, MGA, BWA"></label>
+      <label><span data-i18n="s4.metric"></span>
+        <select id="cMetric">
+          <option value="revenue_cagr" data-i18n="s4.m.cagr"></option>
+          <option value="ebitda_margin" data-i18n="s4.m.margin"></option>
+          <option value="revenue_scale" data-i18n="s4.m.scale"></option>
+          <option value="op_margin" data-i18n="s4.m.opmargin"></option>
+          <option value="pe" data-i18n="s4.m.pe"></option>
+          <option value="pb" data-i18n="s4.m.pb"></option>
+          <option value="price_to_revenue" data-i18n="s4.m.prev"></option>
+          <option value="ev_ebitda" data-i18n="s4.m.evebitda"></option>
+          <option value="ev_ebit" data-i18n="s4.m.evebit"></option>
+          <option value="ev_revenue" data-i18n="s4.m.evrev"></option>
+          <option value="net_margin" data-i18n="s4.m.netmargin"></option>
+          <option value="gross_margin" data-i18n="s4.m.grossmargin"></option>
+          <option value="revenue_yoy" data-i18n="s4.m.yoy"></option>
+        </select></label>
+      <label><span data-i18n="s4.years"></span><input id="cYears" value="3"></label>
+      <label><span data-i18n="s4.asof"></span><input id="cAsof" placeholder="2024-12-31"></label>
+      <label><span data-i18n="s4.market"></span>
+        <select id="cMkt">
+          <option value="" data-i18n="s4.k.auto"></option>
+          <option value="us" data-i18n="s4.k.us"></option>
+          <option value="cn" data-i18n="s4.k.cn"></option>
+          <option value="hk" data-i18n="s4.k.hk"></option>
+        </select></label>
+    </div>
+    <div style="margin-top:14px">
+      <button class="act amber" id="cBtn" onclick="comps()" data-i18n="s4.btn"></button>
+    </div>
+    <div id="cMsg" class="mut" style="margin-top:10px;font-size:12px"></div>
+    <!-- 按次授权的确认条 —— 静态放在这里（不用 JS 造按钮），默认隐藏 -->
+    <div id="cConsent" class="hide" style="margin-top:12px">
+      <div id="cConsentMsg" class="notice issue" style="white-space:pre-wrap"></div>
+      <div style="margin-top:12px">
+        <button class="act" id="cYes" data-i18n="s4.consent.yes"></button>
+        <button class="act quiet" id="cNo" data-i18n="s4.consent.no"></button>
+      </div>
+    </div>
+    <div id="cOut"></div>
+  </div>
+
+  <div class="card hide" id="cardAsk">
+    <h2><span data-i18n="ask.title"></span>
+        <small data-i18n="ask.sub"></small></h2>
+    <div class="notice" data-i18n-html="ask.notice"></div>
+    <div id="askLog" style="margin-top:12px"></div>
+    <div style="margin-top:12px">
+      <button class="act" id="askPlanBtn" onclick="planNext()" data-i18n="ask.plan"></button>
+    </div>
+    <div class="grid2" style="margin-top:12px">
+      <label><span data-i18n="ask.input"></span>
+        <input id="askText" placeholder="租金　/　增长率按 5%" onkeydown="askKey(event)"></label>
+      <div style="align-self:end">
+        <button class="act amber" id="askBtn" onclick="ask()" data-i18n="ask.btn"></button>
+      </div>
+    </div>
+
+    <!-- ── 编排（agent 循环）─────────────────────────────────────────
+         静态放在这里，不用 JS 造按钮（跟上面那条授权确认条一个规矩）。
+         `test_page_handlers.py` 会检查这里引用的函数名真的定义了。 -->
+    <div style="margin-top:22px;padding-top:18px;border-top:1px solid var(--line)">
+      <div class="mut" style="font-size:12px" data-i18n-html="ag.notice"></div>
+      <div class="grid2" style="margin-top:10px">
+        <label><span data-i18n="ag.goalLabel"></span>
+          <input id="agGoal" onkeydown="agKey(event)" data-i18n-ph="ag.goalPh"></label>
+        <div style="align-self:end;display:flex;gap:8px">
+          <select id="agMode">
+            <option value="confirm" data-i18n="ag.modeConfirm"></option>
+            <option value="one_click" data-i18n="ag.modeOneClick"></option>
+          </select>
+          <button class="act amber" id="agBtn" onclick="agentRun()" data-i18n="ag.btn"></button>
+        </div>
+      </div>
+      <!-- 循环停下来问用户时显示 —— 「要不要走这一步」和「要不要授权」共用这一条 -->
+      <div id="agAsk" class="hide" style="margin-top:12px">
+        <div id="agAskMsg" class="notice issue" style="white-space:pre-wrap"></div>
+        <div style="margin-top:12px">
+          <button class="act" onclick="agentAnswer(true)" data-i18n="ag.yes"></button>
+          <button class="act quiet" onclick="agentAnswer(false)" data-i18n="ag.no"></button>
+        </div>
+      </div>
+      <div id="agLog" style="margin-top:12px"></div>
+    </div>
+  </div>
+
+  <div class="card need hide" id="card5">
+    <h2><span class="idx">05</span><span data-i18n="s5.title"></span>
+        <small data-i18n="s5.sub"></small></h2>
+    <div class="notice" style="margin-bottom:14px" data-i18n-html="s5.notice"></div>
+    <div id="questions"></div>
+    <div style="margin-top:18px">
+      <button class="act amber" id="goBtn" onclick="go()" data-i18n="s5.btn"></button>
+    </div>
+  </div>
+
+  <div class="card hide" id="card6">
+    <h2><span class="idx">06</span><span data-i18n="s6.title"></span>
+        <small id="outDir"></small></h2>
+    <div id="missing" style="margin-bottom:14px"></div>
+    <div class="term">
+      <div class="bar"><span class="dots"><i></i><i></i><i></i></span>
+        <span data-i18n="s6.termbar"></span></div>
+      <pre id="report"></pre>
+    </div>
+  </div>
+
+  <footer>
+    <span class="ttl" data-i18n="foot.title"></span><br>
+    <span data-i18n="foot.1"></span><br>
+    <span data-i18n="foot.2"></span><br>
+    <span data-i18n="foot.3"></span>
+    <!-- 看完引导还能找回来 —— 新手最容易的诉求是"刚才那段再说一遍" -->
+    <div style="margin-top:6px"><a href="#" id="onbReplay" style="color:var(--mut)"
+       onclick="onbShow(0);return false" data-i18n="onb.replay"></a></div>
+    <!-- 版本号取自服务端（webapp.VERSION 是唯一来源）——
+         不让页面自己写一个可能与服务对不上的号 -->
+    <div class="verline"><b id="ver"></b></div>
+  </footer>
+
+  <div class="notice hide" id="demoTag" data-i18n-html="demo.tag" style="margin-bottom:0"></div>
+
+<script>
+// ─────────────────────────────  词表  ─────────────────────────────
+// 静态文案走 data-i18n，动态文案走 t('key')。加新文案 = 两处各加一条。
+const I18N = {
+  zh: {
+    "tagline": "本地估值向导 · 尽调材料 → 估值报告 · 全程不出网",
+    "foot.version": "FreeAnalyst v{v} · 本机运行 · 只绑 127.0.0.1",
+    "foot.offline": "FreeAnalyst · 设计预览（未连接本机服务）",
+    "nav.doc": "说明文件",
+    "nav.config": "模型设置",
+    "nav.docstale": "服务是旧进程，可能还没有说明文件页 —— 先重启服务再打开",
+    "pill.egress": "机密材料不出本机 · 连局域网都不去",
+    "pill.nomodel": "无需安装模型 · 估值全流程可用",
+    "onb.skip": "跳过", "onb.next": "下一步", "onb.start": "开始使用", "onb.replay": "重看引导",
+    "onb.hint": "← → 切换 · Esc 跳过",
+    "onb.1.t": "这是什么",
+    "onb.1.b": "<p>把一份标的的材料（CIM、年报、审计报告、扫描件都行）变成<b>可追溯的估值数据</b>：三张表认出来、勾稽校验跑一遍、再按你给的假设算 DCF 与乘数。</p><p>它<b>不做什么</b>：不下投资结论、不替你定假设。每个假设都要你自己填，工具只在旁边给本期数据作参考。</p>",
+    "onb.2.t": "材料怎么进来（都不会被复制）",
+    "onb.2.b": "<p>三种方式：点「选择文件夹…」调系统选择框；把文件夹从访达拖进卡片；或直接填路径。</p><ul><li>材料<b>始终留在你原来的位置</b>，工具只读不写。</li><li><b>材料不出本机</b> —— 说的是连局域网里别的机器都不去，不只是不传出国。<b>数据出境</b>（跨境传输）是法律概念，这里比它严格。</li><li>万一要用云端模型，每一次调用都会先问你、并记进出网审计。</li></ul>",
+    "onb.3.t": "需要装模型吗？不需要",
+    "onb.3.b": "<p>估值这一步<b>一行代码也不靠模型</b> —— 识别、勾稽、DCF、乘数全是程序算的。所以这台机器不装任何模型，也能拿到完整报告。</p><p>只有想「读了材料回答问题」才需要模型。要装的话，在右上角 ⚙ 模型设置里点一下就下载，按你的内存给建议；<b>目前本机模型还没达到我们的质量门槛，只能当辅助</b>（答案要对着原文核）。</p>",
+    "pill.arith": "算术由代码执行 · 不交由模型",
+    "pill.declare": "输入缺失即声明 · 不作假设",
+    "s4.title": "可比公司", "s4.sub": "同行基本面对照 —— 取数、对照、留痕",
+    "s4.notice": "<b>这一步能给三类东西：基本面分布（增速 / 利润率 / 规模）、<b>市值类倍数</b>（P/E、P/B、市值/营业收入）、<b>EV 类倍数</b>（EV/EBITDA、EV/EBIT、EV/收入）。</b>倍数的分子都是 <b>基准日收盘价（不复权）× 申报股数</b>，所以<b>必须填基准日</b>：价格模块刻意只提供「按日期取价」，不提供「最新价」（免得拿今天的股价配去年的报表）。EV 类再加 <b>净债务</b>：口径是<b>有息负债（含融资租赁）− 现金类</b>，<b>不含经营租赁、不含应付账款与递延税</b>；<b>每一项组成</b>都会连同口径写进下方的<b>取数依据</b>，可逐项核对。某一家缺债务或现金科目时，<b>那一家记成缺口、不计入</b> —— <b>绝不拿 0 当「无债」，也不拿市值代替 EV</b>（两者都会让倍数系统性偏低，而且从数字上看不出来）。<b>覆盖：标的是美股时走 SEC EDGAR 的官方 XBRL；标的是 A 股时，同行在<b>这一栏填 6 位 A 股代码</b>，走东财的结构化报表（记得把「标的所在市场」选成 A 股，或让单位带人民币）。标的是港股时，同行在<b>这一栏填 5 位港股代码</b>（如 00700），走东财的港股 F10 主要指标；<b>倍数用源自己算好的 P/E、P/B</b>（那张表里市值是港元、利润是人民币，本工具<b>不自己相除</b>）。</b>同行基本面（增速 / 利润率 / 规模）是<b>公司属性</b>，跨市场对照有意义；<b>倍数与 beta 不要跨市场对照</b>（工具会在结果上方拦下来）。样本不足 3 家时，<b>不给中位数当结论</b>。",
+    "s4.tickers": "可比公司代码（逗号分隔：美股填美股代码，A 股填 6 位代码，港股填 5 位代码）",
+    "s4.metric": "对照指标",
+    "s4.market": "标的所在市场",
+    "s4.k.auto": "自动（按报表币种判断）", "s4.k.us": "美股", "s4.k.cn": "A 股", "s4.k.hk": "港股",
+    "s4.m.cagr": "近三年收入 CAGR", "s4.m.margin": "EBITDA 率", "s4.m.scale": "营业收入规模",
+    "s4.m.opmargin": "营业利润率（A 股同行用；不是 EBITDA 率）",
+    "s4.consent.q": "要去 {host} 取数 —— 同意吗？",
+    "s4.consent.whyTx": "取 A 股「总市值」，与当日现价相除得到股数（算市值用；这是主力源）",
+    "s4.consent.whyEm": "退路：取 A 股「总股本」（实测它从 Python 里一律拒连，成功率低）",
+    "s4.consent.note": "只对**这一次**有效 —— 不写文件、不进环境变量；下一次取还会再问。",
+    "s4.consent.yes": "同意这一次",
+    "s4.consent.no": "不，只给基本面",
+    "s4.consent.declined": "好 —— 那就只给基本面（增速 / 利润率 / 规模），不碰那台主机。",
+    "s4.m.pe": "P / E（市值类，需基准日）", "s4.m.pb": "P / B（市值类，需基准日）",
+    "s4.m.prev": "市值 / 营业收入（市值类，需基准日）",
+    "s4.m.netmargin": "净利率（港股 · 源直接给，比率）",
+    "s4.m.grossmargin": "毛利率（港股 · 源直接给，银行等不适用）",
+    "s4.m.yoy": "营业收入同比（港股 · 源直接给）",
+    "s4.m.evebitda": "EV / EBITDA（需基准日）", "s4.m.evebit": "EV / EBIT（需基准日）",
+    "s4.m.evrev": "EV / 营业收入（需基准日）",
+    "s4.basis": "取数依据",
+    "s4.years": "年数（CAGR 用）", "s4.asof": "基准日（只用该日已披露的财报，可留空）",
+    "s4.btn": "取同行数据",
+    "s4.fetching": "正在取数 —— 走 SEC 公开接口，逐家取，请稍候…",
+    "s4.n": "样本 {n} 家",
+    "s4.thin": "⚠ 样本只有 {n} 家 —— 不足 3 家不给中位数当结论（2 家的「中位数」没有意义）。下列数值仅作单家参考。",
+    "s4.stat": "P25 / 中位 / P75", "s4.range": "区间", "s4.gaps": "取不到的：",
+    "s4.none": "这批代码一家都没取到 —— 换代码，或留空。留空不是缺陷：拿不到同行分布时，不凑一个参照系才是对的。",
+    "ag.title": "编排 · 让模型自己决定下一步",
+    "ag.notice": "<b>这才是 agent 那部分。</b>你给一个目标，模型自己选工具、一步步走。三条同时成立：① <b>每一步都记着「谁定的」</b> —— 它自决的、你点的头、还是你事先授权的；② 出网取数<b>仍然按次问你</b>；③ 数字仍由引擎算，<b>它只决定调什么，不参与计算</b>。",
+    "ag.goalLabel": "目标 —— 你想让它做什么",
+    "ag.goalPh": "看看这份材料：三张表读出来没有？缺什么？还要定哪些假设？",
+    "ag.modeConfirm": "每步确认（它提议，你点头）",
+    "ag.modeOneClick": "一键（它一路走完，只把轨迹给你）",
+    "ag.btn": "开始",
+    "ag.yes": "同意这一步",
+    "ag.no": "停下",
+    "ag.running": "跑着呢…",
+    "ag.byModel": "模型自决",
+    "ag.byUser": "你点头",
+    "ag.byAuto": "授权自决",
+    "ag.stopDone": "它说做完了",
+    "ag.stopMaxSteps": "到步数上限了",
+    "ag.stopRefused": "你拒了某一步",
+    "ag.stopConsent": "卡在授权上",
+    "ag.stopError": "调用不了模型",
+    "ag.stuck": "卡在",
+    "ag.trace": "轨迹",
+    "ag.needModel": "编排要本机模型。先在配置页装一个（装完点「检测」）。",
+    "ask.title": "对话 · 检索原文与录入假设",
+    "ask.sub": "当前**未启用模型** —— 它只会按关键词检索原文，以及把一句话转成假设",
+    "ask.notice": "<b>这个面板现在不接模型</b>，所以它只会做两件事：① <b>检索原文</b>（按关键词找，回文件 + 页码 + 片段 —— 在本地材料上做，不出本机）；② <b>把一句话转成假设</b>（「增长率按 5%」→ 提议填「营业收入增长率」= 5%，来源标「对话输入（未核实）」）。<b>每一处提议都要点「采纳」才生效</b> —— 它不会自己改任何东西，也不会替你算数。装了模型之后，「读懂一段话」接在同一处。",
+    "ask.input": "输入 —— 带数字当录入，不带数字当检索",
+    "ask.btn": "发送",
+    "ask.nopath": "先在第一步解析材料 —— 对话要用它来检索。",
+    "ask.hits": "在材料里找到 {n} 处：",
+    "ask.more": "（只列了前几条）",
+    "ask.nohit": "材料里没有「{q}」—— 换个词试试。",
+    "ask.page": "第 {n} 页 · ",
+    "ask.pick": "这句话可能指多项",
+    "ask.prop": "提议",
+    "ask.trail": "痕迹",
+    "ask.adopt": "采纳（填进第 5 步）",
+    "ask.drop": "忽略",
+    "ask.adopted": "已填入「{k}」—— 这是你的判断，报告里会标明来源。",
+    "ask.nofield": "第 5 步还没有「{k}」这一栏（先让材料解析完成）。",
+    "ask.plan": "带我把剩下的填完",
+    "ask.left": "还差 {n} 项（共 {t} 项）。先问这个：",
+    "ask.done": "清单上的 {n} 项都齐了 —— 可以生成估值报告了。",
+    "ask.ref": "材料里推出来的参考值",
+    "ask.useRef": "沿用这个参考值",
+    "ask.refbad": "这一项材料里推不出来 —— 要你自己给",
+    "step.1": "载入材料", "step.2": "报表识别与勾稽校验",
+    "step.3": "行业建议 · 未接入", "step.4": "可比公司",
+    "step.5": "估值假设", "step.6": "估值结论", "step.7": "财务分析",
+    "notice.scope": "<b>本期实现第 1、2、5、6 步，以及第 4 步（可比公司 · 只做基本面）。</b>第 3 步（行业建议）尚需接入流程层，<b>还没做</b> —— 不呈现为可用功能。可比公司参数也可在第 5 步的可选输入中提供，该路径已贯通。",
+    "s1.title": "载入尽调材料", "s1.sub": "标的材料目录，或单一 PDF 文件",
+    "s1.ph": "/path/to/target/materials/　或　目标公司 2024 年度审计报告.pdf",
+    "s1.btn": "解析材料",
+    "s1.pickdir": "▸ 选择文件夹…", "s1.pickfile": "▸ 选择文件…",
+    "s1.picklabel": "载入方式",
+    "stale.banner": "<b>本页比服务新 —— 跑着的服务是旧进程（缺新接口，或缺新字段）。</b><br>页面每次请求都是现读磁盘，所以它已经更新了；但 Python 代码不会热加载，那个进程还是旧的 —— 点「选择文件夹」会只回一句 unknown endpoint，第 5 步的<b>百分比字段也不会显示 %</b>（那就不知道该填 5、0.05 还是 5%）。<br><b>请重启服务</b>：到运行它的终端按 <code>Ctrl-C</code>，再执行 <code>python3 freeanalyst.py ui &lt;材料目录&gt;</code>。在此之前这几个功能不可用。",
+    "s1.drophint": "也可以把文件夹或文件从访达直接拖进本区域 —— 只填入路径，不复制文件",
+    "s1.pickfetch": "▸ 按名称或代码取财报…",
+    "s1.fpquery": "公司名称或股票代码，例如 600519 / 建設銀行 / AAPL",
+    "s1.fpannual": "年报", "s1.fpinterim": "中期报告", "s1.fpquarter": "季度报告",
+    "s1.fpperiod": "报告期年份，例如 2025",
+    "s1.fpperiodhint": "按报告期检索。若要看某段时间披露的全部文件，请用命令行 --filed",
+    "s1.fpfind": "查询",
+    "s1.fpget": "下载",
+    "s1.fpneedq": "请先填写公司名称或股票代码",
+    "s1.fpsearching": "正在检索公开披露…",
+    "s1.fpfail": "检索失败",
+    "s1.fpwho": "匹配到的公司：",
+    "s1.fpnone": "没有找到符合条件的报告，可换年份或换报告类型再试",
+    "s1.fpdownloading": "正在下载…",
+    "s1.fpready": "已下载并填入上方路径",
+    "s1.picking": "请在系统选择框中选定…（窗口可能在后台，注意查看）",
+    "s1.cancelled": "已取消选择",
+    "s1.dropped": "未能从拖入内容中读取路径 —— 请改用「选择文件夹…」",
+    "s1.needpath": "请先填写材料路径",
+    "s1.running": "<span class=\"warn\">正在解析材料…</span>（PDF 需光学识别，可能耗时数分钟；请保持页面开启）",
+    "s1.ok": "<span class=\"ok\">解析完成</span>",
+    "s2.title": "报表识别与勾稽校验",
+// ── 入口（两条路）+ 07 财务分析 ──
+"nav.mode": "选择功能",
+"onb.4.t": "你要做什么？",
+"onb.4.b": "两个功能，各自独立。<br>① <b>估值</b>：走完整流程 —— 假设 → 可比公司 → 估值报告。<br>② <b>财务分析</b>：只读三张表，把 ROE 拆成 净利率 × 周转率 × 权益乘数，<b>不用回答任何假设</b>。<br>定了以后还能随时改（顶栏「选择功能」）。",
+"mode.appraise": "① 估值　（三张表 → 估值区间：DCF + 乘数法）",
+"mode.analyse": "② 财务分析　（杜邦分解：ROE = 净利率 × 周转率 × 权益乘数）",
+"s7.title": "财务分析（杜邦分解）",
+"s7.sub": "ROE 拆成 净利率 × 总资产周转率 × 权益乘数",
+"s7.btn": "算一下",
+"s7.notice": "只用到三张表里的四个数（净利润 / 营业收入 / 总资产 / 所有者权益）—— <b>不需要任何假设</b>，也不去网上取任何东西。",
+"s7.notapp": "不适用（或数还没凑齐）：",
+"s7.factor": "项目", "s7.value": "数值", "s7.unit": "单位",
+"s7.saved": "报告已存到：",
+"s7.savefail": "报告没存下来：",
+    "s2.sub": "三张报表识别结果 · 勾稽校验状态 · 金额单位与会计口径",
+    "s2.srvnote": "服务端产出的文本（报表标签、勾稽项名称、假设条目、报告正文）目前为中文；英文界面仅覆盖界面文案。引擎层词表为后续工作。",
+    "th.statement": "报表", "th.source": "来源", "th.mapped": "映射行数", "th.status": "状态",
+    "st.found": "已识别", "st.missing": "未识别",
+    "unused.head": "未采用的文件（明确列出，不作静默跳过）",
+    "chk.head": "勾稽校验项", "chk.result": "校验结果",
+    "chk.ok": "校验通过", "chk.bad": "勾稽不符 —— 衍生数据不得使用",
+    "chk.na": "无法校验（缺少科目）", "chk.nr": "不适用（该格式无此项）",
+    "chk.dups": "本材料有 {n} 个科目存在多个取值 —— 通常见于同一页面并列合并报表与母公司报表，请确认所取为合并口径。",
+    "meta.basis": "会计口径", "meta.period": "会计期间", "meta.fix": "如有误，可在下方修正",
+    "unit.label": "金额单位", "unit.warn": "（此处有误即为 1,000 倍量级错误）",
+    "unit.pct": "百分比 · 只填数值（填 8.5 即 8.5%）",
+    "origin.filing": "财报", "origin.derived": "推算 · 请确认",
+    "origin.external": "外部 · 由你提供", "origin.judgment": "你的判断",
+    "unit.basis": "判定依据：", "unit.unknown": "未能判定 —— 必须由您指定",
+    "s5.title": "估值假设", "s5.sub": "仅由您提供的输入 —— 引擎不代为设定",
+    "s5.notice": "每个数值后可附来源，格式 <code>0.10 @管理层规划 p.12</code>；来源前可加 <code>高:</code>/<code>中:</code>/<code>低:</code> 指定置信度。<b>未标注来源视为低置信度</b>，将列示于报告的「结果的软肋」。注释中的「参考」为历史值，<b>不作为建议输入</b>。",
+    "s5.btn": "生成估值报告",
+    "s6.title": "估值结论", "s6.termbar": "估值报告 · 每项结论均附追溯",
+    "out.prefix": "产物：",
+    "miss.head": "以下输入未提供，对应模块未执行（并非执行后无结果）",
+    "demo.tag": "<b>设计预览</b> —— 本页为直接打开（无后端），下方为示例数据，仅用于呈现版式与措辞。实际运行：<code>python3 freeanalyst.py ui &lt;材料目录&gt;</code>",
+    "demo.msg": "<span class=\"warn\">预览模式无后端</span> <span class=\"mut\">—— 解析材料需在服务中运行：python3 freeanalyst.py ui &lt;材料目录&gt;</span>",
+    "demo.go": "<b>设计预览</b> —— 本页无后端，生成报告需在服务中运行。<b>下列为报告示例。</b>",
+    "err.fail": "解析失败",
+    "foot.title": "边界与约束",
+    "foot.1": "① 机密材料仅在本机处理；云端模型调用按次授权，授权记录可审计。",
+    "foot.2": "② 本界面为呈现层：全部计算由同一内核执行（intake / value），界面不重复计算。",
+    "foot.3": "③ 服务仅绑定 127.0.0.1：同一网络内其他设备无法访问本页面。"
+  },
+  en: {
+    "tagline": "Local valuation workbench · Diligence materials → valuation report · Nothing leaves this machine",
+    "foot.version": "FreeAnalyst v{v} · running locally · bound to 127.0.0.1",
+    "foot.offline": "FreeAnalyst · design preview (no local service connected)",
+    "nav.doc": "Documentation",
+    "nav.config": "Model settings",
+    "nav.docstale": "The service process is stale and may not serve the documentation page yet — restart the service first",
+    "pill.egress": "Nothing leaves this machine · not even the local network",
+    "pill.nomodel": "No model required · full valuation works without one",
+    "onb.skip": "Skip", "onb.next": "Next", "onb.start": "Start", "onb.replay": "Show intro again",
+    "onb.hint": "← → switch · Esc skip",
+    "onb.1.t": "What this is",
+    "onb.1.b": "<p>Turns a target's materials (CIM, annual report, audit report, scans) into <b>traceable valuation data</b>: statements recognised, articulation checked, then DCF and multiples on the assumptions you supply.</p><p>What it does <b>not</b> do: it draws no investment conclusion and sets no assumption for you. Every assumption is yours to enter; the tool only shows this period's figures alongside as reference.</p>",
+    "onb.2.t": "How materials get in (nothing is copied)",
+    "onb.2.b": "<p>Three ways: click &quot;Choose folder…&quot; for the native picker; drag a folder from Finder onto the card; or type the path.</p><ul><li>Materials <b>stay where they are</b> — the tool reads, never writes.</li><li><b>Nothing leaves this machine</b> — not even to another computer on the same network, and certainly not across a border. That is stricter than &quot;no cross-border transfer&quot;, which is a legal term of art.</li><li>If a cloud model is ever used, every call asks you first and is recorded in the egress audit.</li></ul>",
+    "onb.3.t": "Do you need a model? No",
+    "onb.3.b": "<p>Valuation uses <b>no model at all</b> — recognition, articulation, DCF and multiples are all computed in code. So this machine can produce the full report with nothing installed.</p><p>A model is only needed for &quot;answer questions over the materials&quot;. To install one, open ⚙ Model settings (top right) and click download — it suggests a size for your RAM. <b>Local models do not yet pass our quality gate and are assistant-only</b> (check answers against the source).</p>",
+    "pill.arith": "Arithmetic executed in code, never by the model",
+    "pill.declare": "Missing inputs are declared, never assumed",
+    "step.1": "Load materials", "step.2": "Extraction & reconciliation",
+    "step.3": "Industry guidance · not wired", "step.4": "Comparables",
+    "step.5": "Valuation assumptions", "step.6": "Valuation conclusion", "step.7": "Financial analysis",
+    "notice.scope": "<b>Steps 1, 2 and 5, 6 plus Step 4 (comparables, fundamentals only) are implemented in this build.</b> Step 3 (industry guidance) requires the workflow layer and is <b>not built</b> — it is not presented as available. Comparable inputs can also be supplied under Step 5; that path is wired.",
+    "s1.title": "Load due diligence materials", "s1.sub": "Target material folder, or a single PDF",
+    "s1.ph": "/path/to/target/materials/　or　Target FY2024 audit report.pdf",
+    "s1.btn": "Parse materials",
+    "s1.pickdir": "▸ Choose folder…", "s1.pickfile": "▸ Choose file…",
+    "s1.picklabel": "Load via",
+    "stale.banner": "<b>This page is newer than the running service — the service process is stale (it lacks a new endpoint or new fields).</b><br>The page is re-read from disk on every request, so it is current; Python code, however, is not hot-reloaded, and the process still running is the old one — clicking “Choose folder…” returns unknown endpoint, and the <b>percentage fields in step 5 show no % sign</b> (leaving you unsure whether to type 5, 0.05 or 5%).<br><b>Restart the service</b>: press <code>Ctrl-C</code> in the terminal running it, then run <code>python3 freeanalyst.py ui &lt;materials&gt;</code> again. Until then these features are unavailable.",
+    "s1.drophint": "Or drag a folder / file here from Finder — the path is filled in; nothing is copied",
+    "s1.pickfetch": "▸ Fetch by name or ticker…",
+    "s1.fpquery": "Company name or ticker, e.g. 600519 / 建設銀行 / AAPL",
+    "s1.fpannual": "Annual", "s1.fpinterim": "Interim", "s1.fpquarter": "Quarterly",
+    "s1.fpperiod": "Reporting year, e.g. 2025",
+    "s1.fpperiodhint": "Search by reporting period. To list everything filed in a date range, use the CLI --filed",
+    "s1.fpfind": "Search",
+    "s1.fpget": "Download",
+    "s1.fpneedq": "Enter a company name or ticker first",
+    "s1.fpsearching": "Searching public filings…",
+    "s1.fpfail": "Search failed",
+    "s1.fpwho": "Matched companies:",
+    "s1.fpnone": "No matching report. Try another year or another report type",
+    "s1.fpdownloading": "Downloading…",
+    "s1.fpready": "Downloaded — path filled in above",
+    "s1.picking": "Select in the system dialog… (it may open behind this window)",
+    "s1.cancelled": "Selection cancelled",
+    "s1.dropped": "No path could be read from the dropped item — please use “Choose folder…”",
+    "s1.needpath": "Please enter a material path first",
+    "s1.running": "<span class=\"warn\">Parsing materials…</span> (PDF requires OCR and may take several minutes; keep this page open)",
+    "s1.ok": "<span class=\"ok\">Parsing complete</span>",
+    "s2.title": "Extraction & reconciliation",
+// ── entry (two paths) + 07 financial analysis ──
+"nav.mode": "Choose tool",
+"onb.4.t": "What do you want to do?",
+"onb.4.b": "Two independent tools.<br>① <b>Valuation</b> — the full flow: assumptions → comparables → valuation report.<br>② <b>Financial analysis</b> — reads the three statements only, splitting ROE into margin × turnover × leverage. <b>No assumptions to answer.</b><br>You can switch at any time from the top bar.",
+"mode.appraise": "① Valuation　(statements → value range: DCF + multiples)",
+"mode.analyse": "② Financial analysis　(DuPont: ROE = margin × turnover × leverage)",
+"s7.title": "Financial analysis (DuPont)",
+"s7.sub": "ROE split into margin × asset turnover × equity multiplier",
+"s7.btn": "Compute",
+"s7.notice": "Uses only four numbers from the statements (net income / revenue / total assets / equity) — <b>no assumptions</b>, and nothing is fetched from the internet.",
+"s7.notapp": "Not applicable (or inputs incomplete):",
+"s7.factor": "Item", "s7.value": "Value", "s7.unit": "Unit",
+"s7.saved": "Report saved to:",
+"s7.savefail": "Report was NOT saved:",
+    "s2.sub": "Statements identified · reconciliation status · reporting unit and accounting basis",
+    "s2.srvnote": "Text produced by the engine (statement labels, reconciliation item names, assumption entries, report body) is currently Chinese only; the English interface covers interface copy. Engine-level translation tables are follow-up work.",
+    "th.statement": "Statement", "th.source": "Source", "th.mapped": "Rows mapped", "th.status": "Status",
+    "st.found": "Identified", "st.missing": "Not identified",
+    "unused.head": "Files not used (listed explicitly, never skipped silently)",
+    "chk.head": "Reconciliation test", "chk.result": "Result",
+    "chk.ok": "Reconciles", "chk.bad": "Does not reconcile — derived figures must not be used",
+    "chk.na": "Not testable (line items missing)", "chk.nr": "Not applicable to this format",
+    "chk.dups": "{n} line items carry more than one value — typically a page holding both consolidated and parent-only statements. Confirm the consolidated column was used.",
+    "meta.basis": "Accounting basis", "meta.period": "Period", "meta.fix": "override below if incorrect",
+    "unit.label": "Reporting unit", "unit.warn": "(an error here is a 1,000× error)",
+    "unit.pct": "Percentage · number only (8.5 means 8.5%)",
+    "origin.filing": "From filings", "origin.derived": "Derived · confirm",
+    "origin.external": "External · your input", "origin.judgment": "Your judgement",
+    "unit.basis": "Determined from: ", "unit.unknown": "Could not be determined — you must specify",
+    "s5.title": "Valuation assumptions", "s5.sub": "Inputs only you can provide — the engine will not set them for you",
+    "s5.notice": "Append a source to each figure: <code>0.10 @management plan p.12</code>. Prefix the source with <code>高:</code>/<code>中:</code>/<code>低:</code> to set confidence (engine syntax remains Chinese). <b>No source is treated as low confidence</b> and appears under the report's weak points. \"Reference\" shows historical values, <b>not recommended inputs</b>.",
+    "s5.btn": "Generate valuation report",
+    "ag.title": "Orchestration · let the model decide the next step",
+    "ag.notice": "<b>This is the agent part.</b> You give a goal; the model picks tools and walks it step by step. Three things hold at once: ① <b>every step records who decided it</b> — the model, you, or a scope you pre-authorised; ② fetching from the network <b>still asks you each time</b>; ③ the numbers are still computed by the engine — <b>it decides what to call, not what the number is</b>.",
+    "ag.goalLabel": "Goal — what you want it to do",
+    "ag.goalPh": "Look at these materials: are the three statements parsed? What is missing?",
+    "ag.modeConfirm": "Confirm each step (it proposes, you approve)",
+    "ag.modeOneClick": "One click (it runs through, you get the trace)",
+    "ag.btn": "Start",
+    "ag.yes": "Approve this step",
+    "ag.no": "Stop",
+    "ag.running": "Running…",
+    "ag.byModel": "model",
+    "ag.byUser": "you approved",
+    "ag.byAuto": "pre-authorised",
+    "ag.stopDone": "it says it is done",
+    "ag.stopMaxSteps": "hit the step limit",
+    "ag.stopRefused": "you refused a step",
+    "ag.stopConsent": "blocked on consent",
+    "ag.stopError": "could not reach the model",
+    "ag.stuck": "Stuck at",
+    "ag.trace": "Trace",
+    "ag.needModel": "Orchestration needs a local model. Install one on the config page, then hit Check.",
+    "ask.title": "Dialogue · search the materials, file an assumption",
+    "ask.sub": "No model is enabled yet — it can search the materials by keyword and turn one sentence into an assumption",
+    "ask.notice": "<b>This panel does not use a model yet.</b> It does exactly two things: ① <b>search the materials</b> (by keyword; returns file + page + snippet — done locally, nothing leaves this machine); ② <b>turn one sentence into an assumption</b> (\"growth 5%\" → proposes Revenue growth = 5%, sourced as \"dialogue input (unverified)\"). <b>Every proposal must be accepted</b> — it never changes anything on its own and never performs arithmetic. Once a model is installed, \"understanding a sentence\" plugs into this same place.",
+    "ask.input": "Input — with a number it files a value; without one it searches",
+    "ask.btn": "Send",
+    "ask.nopath": "Parse materials in step 1 first — the dialogue searches them.",
+    "ask.hits": "{n} match(es) in the materials:",
+    "ask.more": "(only the first few are listed)",
+    "ask.nohit": "No match for \"{q}\" — try another term.",
+    "ask.page": "p.{n} · ",
+    "ask.pick": "This could refer to several items",
+    "ask.prop": "Proposal",
+    "ask.trail": "Trail",
+    "ask.adopt": "Accept (fills step 5)",
+    "ask.drop": "Dismiss",
+    "ask.adopted": "Filled into \"{k}\" — this is your judgement; the report will show its source.",
+    "ask.nofield": "Step 5 has no field named \"{k}\" yet (let the materials finish parsing).",
+    "ask.plan": "Walk me through the rest",
+    "ask.left": "{n} of {t} items still missing. Asking about this one first:",
+    "ask.done": "All {n} items are filled — you can generate the valuation report.",
+    "ask.ref": "Reference derived from the materials",
+    "ask.useRef": "Use this reference",
+    "ask.refbad": "This one cannot be derived from the materials — it has to come from you",
+    "s4.title": "Comparable companies", "s4.sub": "Peer fundamentals — fetch, compare, keep the trail",
+    "s4.notice": "<b>This step returns three kinds of things: fundamental distributions (growth / margin / scale), <b>market-cap multiples</b> (P/E, P/B, market cap / revenue) and <b>EV-based multiples</b> (EV/EBITDA, EV/EBIT, EV/Revenue).</b> The numerator of every multiple is <b>closing price on the as-of date (unadjusted) × reported share count</b>, so <b>an as-of date is required</b>: the price module deliberately offers only \"price on a date\", never \"latest price\" (which would pair today's price with last year's balance sheet). EV-based ones add <b>net debt</b>: defined as <b>interest-bearing debt (including finance leases) − cash and equivalents plus short-term investments</b>, <b>excluding operating leases, payables and deferred taxes</b>; the <b>components</b> and the definition are written into <b>Basis</b> below, item by item. If a peer is missing debt or cash line items, <b>that peer is reported as a gap and left out</b> — never filled with 0, and market cap is never substituted for EV (either would bias the multiple downward, invisibly). <b>Coverage: US targets go through SEC EDGAR's official XBRL; for an A-share target, type the 6-digit A-share codes into this field and the peers come from Eastmoney's structured statements (set \"target's market\" to A-share, or let the unit carry CNY). For an HK target, type <b>5-digit HK codes</b> here (e.g. 00700); peers come from Eastmoney's HK F10, and <b>P/E / P/B are taken as the source computed them</b> (its market cap is in HKD while profit is in RMB — we do not divide across currencies ourselves).</b> Peer fundamentals (growth / margin / scale) are <b>company attributes</b> and do transfer across markets; <b>multiples and beta do not</b> (the tool blocks them above the results). With fewer than 3 peers, <b>no median is presented as a conclusion</b>.",
+    "s4.tickers": "Peer tickers (comma-separated — US tickers, 6-digit codes for A-shares, 5-digit codes for HK)",
+    "s4.metric": "Metric",
+    "s4.market": "Target's market",
+    "s4.k.auto": "Auto (from reporting currency)", "s4.k.us": "US", "s4.k.cn": "A-share", "s4.k.hk": "Hong Kong",
+    "s4.m.cagr": "3-year revenue CAGR", "s4.m.margin": "EBITDA margin",
+    "s4.m.scale": "Revenue scale",
+    "s4.m.opmargin": "Operating margin (for A-share peers; not EBITDA margin)",
+    "s4.consent.q": "Fetch from {host} — allow this once?",
+    "s4.consent.whyTx": "Fetch the A-share total market cap and divide by the day's price to get the share count (the primary source)",
+    "s4.consent.whyEm": "Fallback: fetch A-share total shares (in practice it refuses Python connections, so the success rate is low)",
+    "s4.consent.note": "This one call only — nothing is written to disk or to the environment; you will be asked again next time.",
+    "s4.consent.yes": "Allow this once",
+    "s4.consent.no": "No — fundamentals only",
+    "s4.consent.declined": "Fine — fundamentals only (growth / margin / scale); that host will not be contacted.",
+    "s4.m.pe": "P / E (market cap; needs an as-of date)",
+    "s4.m.pb": "P / B (market cap; needs an as-of date)",
+    "s4.m.prev": "Market cap / Revenue (needs an as-of date)",
+    "s4.m.netmargin": "Net margin (HK · given by the source; a ratio, currency-free)",
+    "s4.m.grossmargin": "Gross margin (HK · given by the source; N/A for banks)",
+    "s4.m.yoy": "Revenue YoY (HK · given by the source)",
+    "s4.m.evebitda": "EV / EBITDA (needs an as-of date)",
+    "s4.m.evebit": "EV / EBIT (needs an as-of date)",
+    "s4.m.evrev": "EV / Revenue (needs an as-of date)",
+    "s4.basis": "Basis",
+    "s4.years": "Years (for CAGR)", "s4.asof": "As-of date (filings disclosed by then; may be blank)",
+    "s4.btn": "Fetch peer data",
+    "s4.fetching": "Fetching via SEC public endpoints, one by one…",
+    "s4.n": "{n} peer(s)",
+    "s4.thin": "⚠ Only {n} peer(s) — with fewer than 3, no median is presented as a conclusion (a median of two means nothing). The figures below are single-company references only.",
+    "s4.stat": "P25 / median / P75", "s4.range": "Range", "s4.gaps": "Not available:",
+    "s4.none": "None of these tickers returned data — change them, or leave the field blank. Blank is not a defect: when peers cannot be obtained, not inventing a benchmark is the right answer.",
+    "s6.title": "Valuation conclusion", "s6.termbar": "Valuation report · every conclusion traceable",
+    "out.prefix": "Artifacts: ",
+    "miss.head": "The following inputs were not provided, so the corresponding blocks were not run (they did not run and return nothing)",
+    "demo.tag": "<b>Design preview</b> — this file was opened directly (no backend); the data below is illustrative and only demonstrates layout and wording. To run for real: <code>python3 freeanalyst.py ui &lt;materials&gt;</code>",
+    "demo.msg": "<span class=\"warn\">No backend in preview mode</span> <span class=\"mut\">— parsing requires the local service: python3 freeanalyst.py ui &lt;materials&gt;</span>",
+    "demo.go": "<b>Design preview</b> — no backend here; report generation requires the local service. <b>The report sample below is illustrative.</b>",
+    "err.fail": "Parsing failed",
+    "foot.title": "Boundaries and constraints",
+    "foot.1": "① Confidential materials are processed on this machine only; cloud model calls are authorised per call and the authorisations are auditable.",
+    "foot.2": "② This interface is a presentation layer: all computation runs in the same kernel (intake / value). The interface re-computes nothing.",
+    "foot.3": "③ The service binds 127.0.0.1 only: other devices on the same network cannot reach this page."
+  }
+};
+
+const $ = id => document.getElementById(id);
+// 默认语言：跟浏览器走 —— **GitHub 上的英文用户第一次打开就该看到英文**，
+// 而不是一段中文然后自己去右上角找开关（引导弹层还会把那个开关盖住）。
+let LANG = localStorage.getItem("fa.lang") ||
+           (((navigator.language || "zh").toLowerCase().startsWith("zh")) ? "zh" : "en");
+// 首次引导只在**第一次**打开时铺满屏；看完记住了（localStorage），
+// 以后想再看，页脚有「重看引导」。
+const ONB_KEY = "fa.onboarded";
+let ONB_I = 0;
+//: 服务端报的版本号（/api/health）。**空 = 没连上服务**（预览模式）——
+//: 页面不自己写死版本号，免得写的是一个跟服务对不上的号。
+let VER = "";
+const t = k => (I18N[LANG] && I18N[LANG][k]) || (I18N.zh[k] || k);
+
+function setVer(){
+  const el = $("ver");
+  if(!el) return;
+  el.textContent = VER ? t("foot.version").replace("{v}", VER) : t("foot.offline");
+}
+
+function applyLang(lang){
+  LANG = lang;
+  localStorage.setItem("fa.lang", lang);
+  document.documentElement.lang = (lang === "en") ? "en" : "zh";
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-html]").forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+  document.querySelectorAll("[data-i18n-ph]").forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll(".lang button").forEach(b => {
+    b.classList.toggle("on", b.dataset.lang === lang);
+  });
+  onbRelang();                        // 引导若正开着，跟着换语言
+  if(STATE.data) rerender();          // 有数据时，表格/清单跟着换语言
+  setVer();                           // 版本号那行也是文案，跟着换
+}
+
+// 直接打开文件（无后端）时用示例数据把六步渲染出来 —— 看设计不必先起服务。
+const DEMO = location.protocol === "file:" || location.search.indexOf("demo") >= 0;
+let DEMO_DONE = false;
+
+const DEMO_DATA = {
+  ok:true, path:"~/deals/target/", label:"Target · Annual report (illustrative)",
+  tables:[
+    {kind:"balance",label:"资产负债表",file:"R2.htm",mapped:31,rows:35,rate:88.6,found:true},
+    {kind:"income",label:"合并利润表",file:"R4.htm",mapped:16,rows:28,rate:57.1,found:true},
+    {kind:"cash_flow",label:"合并现金流量表",file:"R8.htm",mapped:24,rows:61,rate:39.3,found:true}
+  ],
+  unit:"千美元", unit_basis:"R2.htm｜in thousands",
+  gaap:"US GAAP", scope:"合并", audited:"未标注", period:"Dec. 31, 2016",
+  checks:[
+    {name:"资产 = 负债 + 所有者权益", ok:true, applicable:true},
+    {name:"期末现金 = 期初 + 经营 + 投资 + 筹资", ok:true, applicable:true},
+    {name:"净利润 → 经营现金流（间接法）", ok:true, applicable:true}
+  ],
+  unused:["R5.htm（未识别）","R6.htm（未识别）","fitbit1231610k.htm（全文，非报表）"],
+  notes:["金额单位取自报表正文「in thousands」"],
+  warnings:[],
+  questions:[
+    {group:"① 机器推导项（如无异议可直接采用）", key:"unit", label:"金额单位",
+     hint:"此处有误即为 1,000 倍量级错误", default:"千美元", reference:"报表正文",
+     suggest:["元", "千元", "万元", "百万元", "千美元", "百万美元"]},
+    {group:"① 机器推导项（如无异议可直接采用）", key:"gaap", label:"会计口径",
+     hint:"由标题与科目标签共同判定", default:"US GAAP", reference:"",
+     options:["US GAAP", "CAS", "IFRS"]},
+    {group:"① 机器推导项（如无异议可直接采用）", key:"scope", label:"合并 / 单体",
+     hint:"下拉里第一个就是材料推出来的那个值", default:"合并", reference:"",
+     options:["合并", "单体", "母公司报表"]},
+    {group:"① 机器推导项（如无异议可直接采用）", key:"audited", label:"审计状态",
+     hint:"", default:"未标注", reference:"", options:["未标注", "已审计", "未审计"]},
+    {group:"② 场景（决定用哪套方法）", key:"purpose", label:"估值目的",
+     hint:"", default:"并购定价", reference:"",
+     options:["并购定价", "融资定价", "投后NAV", "税务合规"]},
+    {group:"② 场景（决定用哪套方法）", key:"stance", label:"立场",
+     hint:"买方的关注点与卖方不同，结论要看的区间也不一样", default:"买方",
+     reference:"", options:["买方", "卖方", "中立"]},
+    {group:"② 场景（决定用哪套方法）", key:"stage", label:"发展阶段",
+     hint:"", default:"成熟企业", reference:"",
+     options:["成熟企业", "早期项目", "成长企业", "业主经营"]},
+    {group:"③ 资本成本参数（WACC）", key:"risk_free", label:"无风险利率",
+     hint:"10 年期国债收益率", default:"", reference:"0.0245"},
+    {group:"③ 资本成本参数（WACC）", key:"beta_unlevered", label:"无杠杆 β",
+     hint:"可比公司无杠杆贝塔", default:"", reference:"1.10"},
+    {group:"④ 预测期参数（DCF）", key:"growth", label:"营业收入增长率（逐年，逗号分隔）",
+     hint:"年数须与配置中的年份标签一致", default:"", reference:"0.05, 0.05, 0.05"},
+    {group:"④ 预测期参数（DCF）", key:"ebitda_margin", label:"EBITDA 率（逐年）",
+     hint:"仅填一项时自动展开至各年", default:"", reference:"0.06"},
+    {group:"⑤ 可选（不填则对应模块不执行）", key:"advisor_metric", label:"参谋对照的指标",
+     hint:"引擎只支持这三项", default:"revenue_cagr", reference:"",
+     options:["revenue_cagr", "ebitda_margin", "revenue_scale"]}
+  ],
+  out_dir:"out/target"
+};
+const DEMO_REPORT =
+"【设计预览 · 示例数据，非真实结论】\n" +
+"════════════════════════════════════════════════════════\n" +
+" 估值报告 · Target（示例）                基准日 Dec. 31, 2016\n" +
+" 金额单位 千美元　｜　US GAAP · 合并\n" +
+"════════════════════════════════════════════════════════\n" +
+"\n一、结论区间（Football Field）\n" +
+"  DCF          1,131,325 ── 1,372,061      中枢 1,251,693\n" +
+"  乘数法       1,090,000 ── 1,330,000\n" +
+"  可比交易     ——（未提供可比交易）\n" +
+"\n二、DCF 假设与来源\n" +
+"  营业收入增长率   5.0% ×3 年     @管理层规划 p.12（中）\n" +
+"  EBITDA 率        6.0%           @近三年均值（中）\n" +
+"  WACC             8.50%          无风险 2.45% + β 1.10 × ERP 5.5%\n" +
+"  永续增长率       2.5%           @长期通胀（低）\n" +
+"\n三、结果的软肋（低置信度项）\n" +
+"  · 永续增长率仅填数值、未附来源 → 低置信度，且对终值影响最大\n" +
+"  · 债务成本取自历史数据，未经市场校准\n" +
+"\n四、未执行的模块（未执行 ≠ 无结果）\n" +
+"  · 未提供可比公司 → 乘数法仅采用行业默认倍数\n";
+
+let FP_STATE = {filings: []};
+
+function fpToggle(){
+  const p = document.getElementById('fetchPanel');
+  p.hidden = !p.hidden;
+  if(!p.hidden) document.getElementById('fpQuery').focus();
+}
+
+async function fpFind(){
+  const q = document.getElementById('fpQuery').value.trim();
+  const msg = document.getElementById('fpMsg');
+  const list = document.getElementById('fpList');
+  const btn = document.getElementById('fpGetBtn');
+  if(!q){ msg.textContent = t('s1.fpneedq'); return; }
+  msg.textContent = t('s1.fpsearching');
+  list.innerHTML = ''; btn.disabled = true; FP_STATE.filings = [];
+
+  const d = await post('/api/fetch', {
+    mode: 'find', query: q,
+    kind: document.getElementById('fpKind').value,
+    period: document.getElementById('fpPeriod').value.trim()
+  });
+  if(!d || d.ok === false){
+    msg.textContent = (d && d.error) || t('s1.fpfail');
+    return;
+  }
+  msg.textContent = '';
+
+  // 候选公司 —— 匹配到多家必须**摆出来让人看**，不能自动挑
+  if(d.identities && d.identities.length){
+    const c = document.createElement('div');
+    c.className = 'fpcand';
+    c.textContent = t('s1.fpwho') + ' ' +
+      d.identities.slice(0,5).map(i =>
+        `${i.market.toUpperCase()}:${i.code} ${i.name}`).join('　·　');
+    list.appendChild(c);
+  }
+
+  FP_STATE.filings = d.filings || [];
+  FP_STATE.filings.forEach((f, i) => {
+    const row = document.createElement('label');
+    row.className = 'fpitem';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true; cb.dataset.idx = i;
+    cb.onchange = fpSyncBtn;
+    const tt = document.createElement('span');
+    tt.className = 't'; tt.textContent = f.title;
+    const mm = document.createElement('span');
+    mm.className = 'm';
+    mm.textContent = `${f.filed_at}　${f.source}`;
+    row.appendChild(cb); row.appendChild(tt); row.appendChild(mm);
+    list.appendChild(row);
+  });
+
+  (d.failures || []).forEach(x => {
+    // AMBIGUOUS / NO_MATCH 是提示，别画成错误
+    const w = document.createElement('div');
+    w.className = 'fpwarn';
+    w.textContent = `⚠ ${x.reason}：${x.message}`;
+    list.appendChild(w);
+  });
+
+  if(!FP_STATE.filings.length && !(d.failures || []).length)
+    msg.textContent = t('s1.fpnone');
+  fpSyncBtn();
+}
+
+function fpSyncBtn(){
+  const n = document.querySelectorAll('#fpList input[type=checkbox]:checked').length;
+  const btn = document.getElementById('fpGetBtn');
+  btn.disabled = n === 0;
+  btn.textContent = n ? t('s1.fpget') + ` (${n})` : t('s1.fpget');
+}
+
+async function fpGet(){
+  const picks = [...document.querySelectorAll('#fpList input[type=checkbox]:checked')]
+    .map(c => parseInt(c.dataset.idx, 10)).filter(n => !isNaN(n));
+  if(!picks.length) return;
+  const msg = document.getElementById('fpMsg');
+  msg.textContent = t('s1.fpdownloading');
+  const d = await post('/api/fetch', {
+    mode: 'get',
+    query: document.getElementById('fpQuery').value.trim(),
+    kind: document.getElementById('fpKind').value,
+    period: document.getElementById('fpPeriod').value.trim(),
+    picks
+  });
+  if(!d || d.ok === false){
+    msg.textContent = (d && d.error) || t('s1.fpfail');
+    if(d && d.errors && d.errors.length) msg.textContent = d.errors.join('；');
+    return;
+  }
+  // 下完把目录填进路径框 —— 然后走原来那条解析流程，下游一行都不用改
+  document.getElementById('path').value = d.dir;
+  msg.textContent = t('s1.fpready') + ` (${d.files.length})　${d.dir}`;
+  if(d.sources && d.sources.length){
+    const w = document.createElement('div');
+    w.className = 'fpwarn';
+    w.textContent = d.sources.join('  ');
+    document.getElementById('fpList').appendChild(w);
+  }
+  fpSyncBtn();
+}
+
+function post(url, body){
+  return fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                     body: JSON.stringify(body)}).then(r => r.json());
+}
+function esc(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+function demo(){
+  if(DEMO_DONE) return;
+  DEMO_DONE = true;
+  const d = DEMO_DATA;
+  STATE.data = d;
+  $("path").value = d.path;
+  $("scanMsg").innerHTML = '<span class="mut">' + t("demo.msg") + '</span>';
+  rerender();
+  $("s2").className = "step on";
+  $("s4").className = "step on";
+  $("s5").className = "step need on";
+  $("s6").className = "step on";
+  $("card2").classList.remove("hide");
+  $("card4").classList.remove("hide");
+  $("cardAsk").classList.remove("hide");
+  $("card5").classList.remove("hide");
+  $("outDir").textContent = t("out.prefix") + "out/target/";
+  $("report").textContent = DEMO_REPORT;
+  $("card6").classList.remove("hide");
+  $("srvNote").classList.remove("hide");
+  $("demoTag").classList.remove("hide");
+  setVer();                           // 预览模式：显示"未连接服务"
+}
+
+// 让服务去调系统原生选择框，拿真实路径 —— **不上传、不复制**（材料留在原地）
+function pick(kind){
+  if(DEMO_DONE){ $("scanMsg").innerHTML = t("demo.msg"); return; }
+  $("scanMsg").innerHTML = '<span class="warn">' + t("s1.picking") + '</span>';
+  post("/api/pick", {kind:kind}).then(d => {
+    if(d.ok){
+      $("path").value = d.path;
+      $("scanMsg").innerHTML = '<span class="ok">' + esc(d.path) + '</span>';
+    } else if(d.cancelled){
+      $("scanMsg").innerHTML = '<span class="mut">' + t("s1.cancelled") + '</span>';
+    } else {
+      $("scanMsg").innerHTML = '<span class="bad">' + esc(d.error || t("err.fail")) + '</span>';
+    }
+  }).catch(e => {
+    $("scanMsg").innerHTML = '<span class="bad">' + esc(String(e)) + '</span>';
+  });
+}
+
+// 从访达拖进来：浏览器会在 dataTransfer 里给 file:/// 开头的 URL，那就是真实路径，
+// 所以这条路同样**不上传、不复制**。取不到路径就明说，不假装成功。
+function wireDrop(){
+  const card = $("path").closest(".card");
+  if(!card) return;
+  ["dragenter", "dragover"].forEach(ev => card.addEventListener(ev, e => {
+    e.preventDefault();
+    if(e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    card.classList.add("drop");
+  }));
+  ["dragleave", "dragend"].forEach(ev =>
+    card.addEventListener(ev, () => card.classList.remove("drop")));
+  card.addEventListener("drop", e => {
+    e.preventDefault();
+    card.classList.remove("drop");
+    const dt = e.dataTransfer;
+    if(!dt) return;
+    let p = dt.getData("text/uri-list") || dt.getData("text/plain") || "";
+    p = p.split("\n").map(s => s.trim()).filter(s => s && s.charAt(0) !== "#")[0] || "";
+    if(p.indexOf("file://") === 0){
+      try { p = decodeURIComponent(p.replace(/^file:\/\/(localhost)?/, "")); } catch(_){}
+    }
+    p = p.replace(/\/+$/, "") || "/";
+    if(p.charAt(0) === "/"){
+      $("path").value = p;
+      $("scanMsg").innerHTML = '<span class="ok">' + esc(p) + '</span>';
+    } else {
+      $("scanMsg").innerHTML = '<span class="bad">' + t("s1.dropped") + '</span>';
+    }
+  });
+}
+
+// ─── 入口：两条路（估值 / 财务分析）─────────────────────────────────────
+// **入口在首次引导的最后一屏**（用户 2026-09-29 的意见：页面已经很长，
+// 再在顶上摆一张大卡，新用户更无从下手）。返回用户走顶栏的「选择功能」。
+// 共用「扫材料 + 认三张表」，之后分岔。**默认估值** —— 老流程一个字都不变。
+function setMode(m){
+  STATE.mode = (m === "analyse") ? "analyse" : "appraise";
+  const isAn = STATE.mode === "analyse";
+  $("s7").classList.toggle("hide", !isAn);          // 财务分析那一步只在它那条路上出现
+  // ★ 步骤条**一选就重排**，不等扫描 —— 否则刚选完会看到
+  // "01 02 03 04 05 06 03"，比不改还乱。
+  ["s3","s4","s5","s6"].forEach(id => {
+    const el = $(id); if(el) el.classList.toggle("hide", isAn);
+  });
+  if(!isAn) $("card7").classList.add("hide");
+  renumber();                                       // 编号按模式重编（03 / 07）
+  if(STATE.data) applyMode();                       // 扫过了：卡片也要收起来
+  // 引导弹层里的两个选项：给选中态（弹层没开时这两个元素可能不在，一律空安全）
+  const a = $("onbModeAppraise"), b = $("onbModeAnalyse");
+  if(a) a.classList.toggle("on", !isAn);
+  if(b) b.classList.toggle("on", isAn);
+}
+
+// 在引导里选完 → 记下并关掉弹层。**没有"默认"这一说**：选了什么就是什么。
+function onbPick(m){
+  setMode(m);
+  onbDone();
+}
+
+// 按模式决定显示哪些卡片。**只在财务分析时藏 03–06** ——
+// 估值模式一个字都不动（老流程保持原样）。
+function applyMode(){
+  const isAn = STATE.mode === "analyse";
+  if(!isAn) return;
+  ["card4","cardAsk","card5","card6"].forEach(id => {
+    const el = $(id); if(el) el.classList.add("hide");
+  });
+  // ★ 步骤条**不摆在那儿变灰**，直接不显示：
+  // 灰着也在说"还有四步等着你"，而财务分析这条路根本不经过它们。
+  ["s3","s4","s5","s6"].forEach(id => {
+    const el = $(id); if(el) el.classList.add("hide");
+  });
+  if(STATE.data) $("card7").classList.remove("hide");
+}
+
+// 两条路**各自编号**（2026-09-29 用户意见）：
+//   估值     01 载入 → 02 报表识别 → 03 行业 → 04 可比 → 05 假设 → 06 结论
+//   财务分析 01 载入 → 02 报表识别 → 03 财务分析（杜邦分解）
+// 同一个功能在两边的号不一样，所以号是**算出来的**，不是写死的。
+function renumber(){
+  const isAn = STATE.mode === "analyse";
+  const pill = $("s7") && $("s7").querySelector(".n");
+  if(pill) pill.textContent = isAn ? "03" : "07";
+  const idx = $("card7") && $("card7").querySelector(".idx");
+  if(idx) idx.textContent = isAn ? "03" : "07";
+}
+
+async function analyse(){
+  if(!STATE.path){ $("anMsg").textContent = t("s1.needpath"); return; }
+  $("anBtn").disabled = true;
+  $("anMsg").innerHTML = t("s1.running");
+  try{
+    const d = await post("/api/analyse", {path: STATE.path, unit: STATE.unit});
+    $("anBtn").disabled = false;
+    if(!d.ok){ $("anMsg").innerHTML = '<span class="bad">' + esc(d.error || "") + '</span>'; return; }
+    $("anMsg").innerHTML = "";
+    renderDupont(d);
+  }catch(e){
+    $("anBtn").disabled = false;
+    $("anMsg").innerHTML = '<span class="bad">' + esc(String(e)) + '</span>';
+  }
+}
+
+// 杜邦的渲染。**算不出来就说算不出来** —— 不显示一堆"—"糊过去。
+function renderDupont(d){
+  const head = '<div class="mut" style="font-size:12px;margin-bottom:8px">' +
+    esc(d.period || "") + (d.unit ? " · " + esc(t("s7.unit")) + " " + esc(d.unit) : "") +
+    '</div>';
+  if(!d.applicable){
+    $("anOut").innerHTML = head + '<div class="notice issue">' + esc(t("s7.notapp")) +
+      " " + esc(d.why_not || "") + '</div>';
+    return;
+  }
+  let h = head + '<table><thead><tr><th>' + esc(t("s7.factor")) +
+          '</th><th class="num">' + esc(t("s7.value")) + '</th></tr></thead><tbody>';
+  for(const raw of d.lines){
+    const s = String(raw).trim();
+    if(!s || s.indexOf("杜邦分析（") === 0) continue;
+    const m = s.match(/^(.*?)\s{2,}(.*)$/);
+    h += "<tr><td>" + esc(m ? m[1] : s) + '</td><td class="num">' +
+         esc(m ? m[2] : "") + "</td></tr>";
+  }
+  h += "</tbody></table>";
+  for(const n of (d.notes || []))
+    h += '<div class="notice quiet" style="margin-top:10px">' + esc(n) + "</div>";
+  // 落盘结果要说出来 —— 存哪儿了、没存下来是什么原因，都得看得见
+  if(d.files && d.files.report)
+    h += '<div class="notice quiet" style="margin-top:12px">' + esc(t("s7.saved")) +
+         '<div style="margin-top:6px;word-break:break-all">' +
+         esc(d.files.report) + "</div></div>";
+  if(d.files && d.files.error)
+    h += '<div class="notice issue" style="margin-top:12px">' + esc(t("s7.savefail")) +
+         esc(d.files.error) + "</div>";
+  $("anOut").innerHTML = h;
+}
+
+function scan(){
+  if(DEMO_DONE){
+    $("scanMsg").innerHTML = t("demo.msg");
+    return;
+  }
+  const p = $("path").value.trim();
+  if(!p){ $("scanMsg").textContent = t("s1.needpath"); return; }
+  $("scanBtn").disabled = true;
+  $("scanMsg").innerHTML = t("s1.running");
+  post("/api/scan", {path:p, unit:STATE.unit}).then(d => {
+    $("scanBtn").disabled = false;
+    if(!d.ok){
+      // **不许只说「解析失败」。** 后端给了完整诊断，照实说出来 ——
+      // 用户要能分清「这版本还不支持」和「解析器崩了」，两者处置完全不同。
+      const head = (d.diagnosis && d.diagnosis.headline) || d.error || t("err.fail");
+      $("scanMsg").innerHTML = '<span class="bad">' + esc(head) + '</span>';
+      if(d.diagnosis) renderDiagnosis(d.diagnosis);
+      if(d.tables){ renderTables(d); renderMeta(d); $("card2").classList.remove("hide"); }
+      return;
+    }
+    STATE.path = d.path;
+    STATE.data = d;
+    $("scanMsg").innerHTML = t("s1.ok") + ' <span class="mut">· ' + esc(d.label) + '</span>';
+    if(d.diagnosis) renderDiagnosis(d.diagnosis);
+    rerender();
+    $("s2").className = "step on";
+    $("s4").className = "step on";
+    $("s5").className = "step need on";
+    $("s6").className = "step on";
+    $("card2").classList.remove("hide");
+    $("card4").classList.remove("hide");
+    $("cardAsk").classList.remove("hide");
+    $("card5").classList.remove("hide");
+    $("srvNote").classList.remove("hide");
+    applyMode();                       // 财务分析模式下：藏掉 03–06、亮出 07
+    $("card2").scrollIntoView({behavior:"smooth", block:"start"});
+  }).catch(e => {
+    $("scanBtn").disabled = false;
+    $("scanMsg").innerHTML = '<span class="bad">' + esc(String(e)) + '</span>';
+  });
+}
+
+// ─── 第 4 步 · 可比公司 ───────────────────────────────────────────────
+// 指标分两族：基本面（增速 / 率 / 规模）与市值类倍数（P/E、P/B、市值·收入…）。
+// 倍数要「基准日市值」，所以**必须填基准日**；A 股同行的倍数还要另一样东西：
+// **股数** —— 它来自盘口主机，那台主机在按次授权名单里，**每取一次都要用户点头**。
+// 样本 < 3 家时界面**不把中位数当结论** —— 纪律来自 comps_workflow。
+function fmtNum(v, fmt){
+  if(v === null || v === undefined || isNaN(v)) return "—";
+  const spec = String(fmt || "");
+  // 小数位数**从格式串里读**，不再靠 indexOf("f") 一刀切。
+  // ★ 实测踩到：`.1f` / `.2f` 也含字母 f，旧写法一律当"整数"处理 ——
+  //   于是 P/E 10.82 显示成「11」、P/B 1.10 显示成「1」：
+  //   接口里的数是对的，**界面把它抹平了**，而且看着还挺正常。
+  const d = Number((spec.match(/\.(\d)/) || [0, "0"])[1]);
+  if(spec.indexOf("%") >= 0)
+    return (Number(v) * 100).toFixed(d) + "%";
+  if(spec.indexOf("f") >= 0)
+    return Number(v).toLocaleString(undefined,
+      {minimumFractionDigits: d, maximumFractionDigits: d});
+  return String(v);
+}
+
+// `consent` 是用户刚点过同意的那台主机 —— 只有点过才有，**不缓存、不留档**。
+async function comps(consent){
+  const tickers = ($("cTickers").value || "").trim();
+  if(!tickers){
+    $("cMsg").innerHTML = '<span class="bad">' + esc(t("s4.tickers")) + '</span>';
+    return;
+  }
+  $("cBtn").disabled = true;
+  $("cOut").innerHTML = "";
+  $("cConsent").classList.add("hide");     // 上一次的确认条不留在那儿
+  $("cMsg").innerHTML = '<span class="warn">' + esc(t("s4.fetching")) + '</span>';
+  try{
+    const body = {tickers: tickers,
+      metric: $("cMetric").value, years: $("cYears").value || 3,
+      as_of: ($("cAsof").value || "").trim(),
+      target_unit: (STATE.data && STATE.data.unit) || "",
+      target_market: $("cMkt").value || ""};
+    if(consent && consent.length) body.consent = consent;
+    const out = await post("/api/comps", body);
+    $("cBtn").disabled = false;
+    // ★ 新主机要用户点头。这**不是失败** —— 所以不报红，
+    //   而是摆一句问话 + 同意 / 取消两个按钮。
+    if(out.needs_consent){ $("cMsg").innerHTML = ""; renderConsent(out.needs_consent); return; }
+    if(!out.ok){
+      $("cMsg").innerHTML = '<span class="bad">' + esc(out.error || "") + '</span>';
+      return;
+    }
+    STATE.comps = out;
+    $("cMsg").innerHTML = "";
+    renderComps();
+  }catch(e){
+    $("cBtn").disabled = false;
+    $("cMsg").innerHTML = '<span class="bad">' + esc(String(e)) + '</span>';
+  }
+}
+
+// 按次授权的确认条（HTML 里已经静态放着，这里只填内容与显隐）。
+// 说清三件事：去哪台主机、取什么用、**只对这一次有效**。
+// 点"同意"就带着这台主机的名字重发一次 —— 服务端会**再核一遍**名单，
+// 前端传什么都改不了服务端认不认（见 webapp._host_consents）。
+function renderConsent(nc){
+  const host = nc.host || "";
+  const whyKey = { "qt.gtimg.cn": "s4.consent.whyTx",
+                   "push2.eastmoney.com": "s4.consent.whyEm" }[host];
+  const why = whyKey ? t(whyKey) : (nc.purpose || "");
+  $("cConsentMsg").textContent =
+    t("s4.consent.q").replace("{host}", host) + "\n" + why + "\n" + t("s4.consent.note");
+  $("cConsent").classList.remove("hide");
+  $("cYes").onclick = () => { $("cConsent").classList.add("hide"); comps([host]); };
+  $("cNo").onclick = () => {
+    $("cConsent").classList.add("hide");
+    $("cMsg").innerHTML = '<span class="mut">' + esc(t("s4.consent.declined")) + '</span>';
+  };
+}
+
+function renderComps(){
+  const d = STATE.comps;
+  if(!d) return;
+  if(!d.n){
+    $("cOut").innerHTML = '<div class="notice issue">' + esc(t("s4.none")) + '</div>';
+    return;
+  }
+  let h = "";
+  // **口径警告放最上面** —— 标的和同行不在同一个市场时，先说清"这一步的输出不能怎么用"。
+  // 放在结果下面等于藏起来：看到表就已经用上了。
+  if(d.market_warning)
+    h += '<div class="notice issue" style="white-space:pre-wrap;margin-bottom:12px">' +
+         md(d.market_warning) + '</div>';
+  // 绝对金额跨币种时，同行分布自身有效、但与标的比规模要先换算 —— 说清楚
+  if(d.scale_note)
+    h += '<div class="notice issue" style="white-space:pre-wrap;margin-bottom:12px">' +
+         md(d.scale_note) + '</div>';
+  // 声明与币种推断不一致等 —— 记录性说明，不吓人
+  if(d.scope && d.scope.notes && d.scope.notes.length)
+    h += '<div class="mut" style="margin-bottom:12px;font-size:12px">' +
+         d.scope.notes.map(n => md(n)).join('<br>') + '</div>';
+  if(!d.enough) h += '<div class="notice issue" style="margin-bottom:12px">' +
+      esc(t("s4.thin").replace("{n}", d.n)) + '</div>';
+  h += '<table><thead><tr><th>' + esc(d.title) + '</th><th class="num">' +
+       esc(t("s4.metric")) + '</th></tr></thead><tbody>';
+  for(const r of d.rows)
+    h += '<tr><td>' + esc(r.label) + '</td><td class="num">' +
+         fmtNum(r.value, d.fmt) + '</td></tr>';
+  h += '</tbody></table>';
+  h += '<div class="mut" style="margin-top:10px;font-size:12px">' +
+       esc(t("s4.n").replace("{n}", d.n)) + " · " + esc(t("s4.stat")) + "：" +
+       fmtNum(d.p25, d.fmt) + " / " + fmtNum(d.median, d.fmt) + " / " +
+       fmtNum(d.p75, d.fmt) +
+       (d.lo === null ? "" : " · " + esc(t("s4.range")) + "：" +
+        fmtNum(d.lo, d.fmt) + " – " + fmtNum(d.hi, d.fmt)) +
+       (d.source ? " · " + esc(d.source) : "") + '</div>';
+  // **取数依据** —— 市值类倍数把「行情」和「财报」两个世界拼在一起，
+  // 每个时点都要能答得出来（价格哪一天 × 股数哪一天 ÷ 分母哪个期末）。
+  if((d.basis || []).length)
+    h += '<div class="mut" style="margin-top:10px;font-size:12px">' +
+         esc(t("s4.basis")) + '<br>' +
+         d.basis.map(b => "· " + esc(b)).join("<br>") + '</div>';
+  if((d.gaps || []).length)
+    h += '<div class="notice quiet" style="margin-top:12px">' + esc(t("s4.gaps")) +
+         '<br>' + d.gaps.map(g => "· " + esc(g)).join("<br>") + '</div>';
+  $("cOut").innerHTML = h;
+}
+
+// ─── 对话面板（**当前不接模型**）───────────────────────────────────────
+// 现在只会两件事，都是纯代码：
+//   ① 检索原文 —— 关键词 → 文件 + 页码 + 片段（在本地材料上做，不出本机）
+//   ② 把一句话转成提议 —— 字段 + 值 + 来源，**点「采纳」才写进字段**
+// 分流规则和"有没有模型"无关：**带数字当录入，不带数字当检索**。
+function pushAsk(kind, html){
+  const el = $("askLog"); if(!el) return;
+  const cls = kind === "you" ? "kv" : kind === "bad" ? "notice issue"
+            : kind === "ok" ? "notice" : kind === "mut" ? "mut" : "notice quiet";
+  el.insertAdjacentHTML("beforeend",
+    '<div class="' + cls + '" style="margin:8px 0;font-size:13px">' + html + '</div>');
+  el.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function askKey(e){ if(e.key === "Enter") ask(); }
+
+async function ask(){
+  const text = ($("askText").value || "").trim();
+  if(!text) return;
+  if(!STATE.path){ pushAsk("bad", esc(t("ask.nopath"))); return; }
+  pushAsk("you", esc(text));
+  $("askText").value = "";
+  const withNumber = /\d/.test(text);
+  try{
+    const out = await post("/api/ask", withNumber
+      ? {action:"propose", path:STATE.path, text:text}
+      : {action:"search",  path:STATE.path, q:text});
+    if(!out.ok){
+      pushAsk("bad", esc(out.error || ""));
+      if(out.ambiguous && out.candidates)
+        pushAsk("mut", esc(t("ask.pick")) + "：" +
+                out.candidates.map(c => esc(c.label)).join(" / "));
+      return;
+    }
+    if(!withNumber){
+      if(!out.total){ pushAsk("mut", esc(t("ask.nohit").replace("{q}", out.q))); return; }
+      pushAsk("ok", esc(t("ask.hits").replace("{n}", out.total)) +
+              (out.truncated ? " " + esc(t("ask.more")) : ""));
+      for(const h of out.hits)
+        pushAsk("hit", (h.page ? esc(t("ask.page").replace("{n}", h.page)) : "") +
+                "<b>" + esc(h.file) + "</b>　" + esc(h.snippet));
+    }else{
+      STATE.proposal = out.proposal;
+      renderProposal(out.proposal);
+    }
+  }catch(e){ pushAsk("bad", esc(String(e))); }
+}
+
+// ─────────────────── 编排（agent 循环）───────────────────
+//
+// 跟后端的分工：循环跑到「要问用户」就停下，把 Session 存在服务端；
+// 前端拿着 run_id 回来 resume。**所以这里没有轮询，只有一问一答。**
+let AG = { runId: "", ask: null, busy: false };
+
+function agKey(e){ if(e.key === "Enter") agentRun(); }
+
+function agPush(kind, html){
+  const cls = {you:"", ok:"notice ok", bad:"notice issue", mut:"mut"}[kind] || "";
+  $("agLog").insertAdjacentHTML("beforeend",
+    '<div class="' + cls + '" style="margin:8px 0;font-size:13px">' + html + "</div>");
+}
+
+async function agentRun(){
+  if(AG.busy) return;                       // 同一个请求还没回来，别叠加
+  const goal = ($("agGoal").value || "").trim();
+  if(!goal) return;
+  if(!STATE.path){ agPush("bad", esc(t("ask.nopath"))); return; }
+  AG.busy = true; AG.runId = ""; AG.ask = null;
+  $("agLog").innerHTML = "";
+  $("agAsk").classList.add("hide");
+  agPush("mut", esc(t("ag.running")));
+  await agStep({action:"run", path:STATE.path, goal:goal,
+                autonomy:($("agMode").value || "confirm")});
+}
+
+async function agentAnswer(allow){
+  // ⚠️ 不能拿 `busy` 当「等答案」的判据 —— 等的时候正是不 busy 的时候。
+  // 用 `ask` 在不在判断：没有待答的问题就不该响应。
+  if(AG.busy || !AG.ask) return;
+  const hosts = (AG.ask.payload && AG.ask.payload.hosts) || [];
+  $("agAsk").classList.add("hide");
+  AG.busy = true; AG.ask = null;
+  await agStep({action:"resume", path:STATE.path, run_id:AG.runId,
+                allow:!!allow, hosts:hosts});
+}
+
+async function agStep(body){
+  try{
+    const out = await post("/api/ask", body);
+    if(!out.ok){ agPush("bad", esc(out.error || "")); AG.busy = false; return; }
+    AG.runId = out.run_id || AG.runId;
+    renderTrace(out.trace);
+    if(out.state === "asking"){
+      AG.ask = out.ask;
+      $("agAskMsg").textContent = out.ask.question || "";
+      $("agAsk").classList.remove("hide");
+    }
+  }catch(e){ agPush("bad", esc(String(e))); }
+  AG.busy = false;                          // 无论问还是结束，请求都回来了
+}
+
+function renderTrace(tr){
+  if(!tr) return;
+  const byKey = {model:"ag.byModel", user:"ag.byUser", auto:"ag.byAuto"};
+  const stopKey = {done:"ag.stopDone", max_steps:"ag.stopMaxSteps",
+                   refused:"ag.stopRefused", needs_consent:"ag.stopConsent",
+                   error:"ag.stopError"};
+  let html = '<div class="mut" style="font-size:12px">' + esc(t("ag.trace")) +
+             "　" + esc(tr.model) + "　" +
+             esc((tr.autonomy === "one_click") ? t("ag.modeOneClick") : t("ag.modeConfirm")) +
+             "</div>";
+  for(const s of (tr.steps || [])){
+    html += '<div style="margin:7px 0;font-size:13px">' +
+      (s.ok ? "✓" : "✗") + " <b>" + esc(s.tool) + "</b>" +
+      ' <span class="mut">（' + esc(t(byKey[s.by] || "ag.byModel")) +
+      "　" + s.seconds + "s）</span>" +
+      (s.note ? '<br><span class="mut">' + esc(s.note) + "</span>" : "") + "</div>";
+  }
+  html += '<div class="mut" style="font-size:12px;margin-top:8px">' +
+          esc(t(stopKey[tr.stop] || tr.stop)) +
+          (tr.stuck ? "　" + esc(t("ag.stuck")) + "：" + esc(tr.stuck) : "") + "</div>";
+  if(tr.final)
+    html += '<div style="margin-top:10px;white-space:pre-wrap">' + esc(tr.final) + "</div>";
+  $("agLog").innerHTML = html;
+}
+
+function renderProposal(p){
+  pushAsk("ok", "<b>" + esc(t("ask.prop")) + "：</b>" + esc(p.label) +
+    " = <b>" + esc(p.value) + "</b><br><span class=\"mut\">" + esc(p.why) + "</span><br>" +
+    "<span class=\"mut\">" + esc(t("ask.trail")) + "：" + esc(p.source) + " · " +
+    esc(p.confidence) + "</span><br>" +
+    '<button class="act" onclick="adopt()">' + esc(t("ask.adopt")) + "</button> " +
+    '<button class="act" onclick="dropProposal()">' + esc(t("ask.drop")) + "</button>");
+}
+
+// 「已填了哪些」—— 按 `data-key` **精确读**（输入框本来就带这个属性），不靠猜标签。
+function filledMap(){
+  const out = {};
+  document.querySelectorAll("#questions [data-key]").forEach(el => {
+    const v = (el.value || "").trim();
+    if(v) out[el.getAttribute("data-key")] = v;
+  });
+  return out;
+}
+
+// 带我把剩下的填完 —— **次序由服务端算**（依据是"用户的成本"，见 webapp._ask_order），
+// 页面只负责问、填、和问下一项。它不会替用户决定任何值。
+async function planNext(){
+  if(!STATE.path){ pushAsk("bad", esc(t("ask.nopath"))); return; }
+  const btn = $("askPlanBtn"); if(btn) btn.disabled = true;
+  try{
+    const out = await post("/api/ask",
+      {action:"plan", path:STATE.path, filled:filledMap()});
+    if(btn) btn.disabled = false;
+    if(!out.ok){ pushAsk("bad", esc(out.error || "")); return; }
+    STATE.plan = out;
+    if(!out.next){ pushAsk("ok", esc(t("ask.done").replace("{n}", out.total))); return; }
+    const q = out.next;
+    // 参考值只有**像个数**的时候才给「沿用」按钮 —— "数据不足"不能当值填进去。
+    const usable = /\d/.test(q.reference || "");
+    pushAsk("ok",
+      "<b>" + esc(t("ask.left").replace("{n}", out.missing).replace("{t}", out.total)) +
+      "</b><br>→ <b>" + esc(q.label) + "</b>　<span class=\"mut\">" + esc(q.why) + "</span>" +
+      (q.hint ? '<br><span class="mut">' + esc(q.hint) + "</span>" : "") +
+      (usable
+        ? '<br><span class="mut">' + esc(t("ask.ref")) + "：" + esc(q.reference) + "</span> " +
+          '<button class="act" onclick="adoptPlan()">' + esc(t("ask.useRef")) + "</button>"
+        : '<br><span class="mut">' + esc(t("ask.refbad")) + "</span>"));
+    STATE.proposal = {key:q.key, label:q.label, value:q.reference || "",
+                      source:"材料参考值 · 用户确认", confidence:"中"};
+  }catch(e){
+    if(btn) btn.disabled = false;
+    pushAsk("bad", esc(String(e)));
+  }
+}
+
+// 沿用参考值 → 填进真实的输入框 → **接着问下一项**
+function adoptPlan(){
+  const p = STATE.proposal;
+  if(!p || !p.value) return;
+  const el = document.querySelector('#questions [data-key="' + p.key + '"]');
+  if(!el){ pushAsk("bad", esc(t("ask.nofield").replace("{k}", p.label))); return; }
+  el.value = p.value + " @" + p.source;
+  el.dispatchEvent(new Event("input", {bubbles:true}));
+  pushAsk("ok", esc(t("ask.adopted").replace("{k}", p.label)) + "　<b>" + esc(p.value) + "</b>");
+  STATE.proposal = null;
+  planNext();
+}
+
+// 采纳 = **填进第 5 步那个真实的输入框** —— 按 `data-key` 精确找（标签是退路）。
+// 填进去的格式沿用既有约定：`值 @来源`（报告里"结果的软肋"会按来源列出来）。
+function adopt(){
+  const p = STATE.proposal;
+  if(!p) return;
+  let hit = document.querySelector('#questions [data-key="' + p.key + '"]');
+  if(!hit){
+    document.querySelectorAll("#questions input, #questions select, #questions textarea")
+      .forEach(b => {
+        if(hit) return;
+        const lab = (b.closest("label") || b.parentElement || {}).textContent || "";
+        if(lab.indexOf(p.label) >= 0) hit = b;
+      });
+  }
+  if(!hit){ pushAsk("bad", esc(t("ask.nofield").replace("{k}", p.label))); return; }
+  hit.value = p.value + " @" + p.source;
+  hit.dispatchEvent(new Event("input", {bubbles:true}));
+  pushAsk("ok", esc(t("ask.adopted").replace("{k}", p.label)) +
+          "　<b>" + esc(p.value) + "</b>");
+  STATE.proposal = null;
+}
+
+function dropProposal(){
+  STATE.proposal = null;
+  pushAsk("mut", esc(t("ask.drop")));
+}
+
+// 有数据时按当前语言重绘（切语言也走这里）
+function rerender(){
+  const d = STATE.data;
+  if(!d) return;
+  renderTables(d); renderChecks(d); renderMeta(d); renderUnit(d); renderQuestions(d);
+  renderComps();
+}
+
+function renderDiagnosis(dg){
+  const box = $("scanDiag");
+  if(!dg){ box.classList.add("hide"); return; }
+  box.classList.remove("hide");
+
+  const row = (txt) => `<div class="dgrow">${txt}</div>`;
+  const hint = (txt) => `<div class="dghint">${txt}</div>`;
+  let h = `<div class="dghead">${esc(dg.headline || "")}</div>`;
+
+  // ① 认出了什么 —— 先把事实摆出来，再说为什么不行
+  h += row("三张表：" + ["balance","income","cash_flow"].map(k => {
+    const names = {balance:"资产负债表", income:"利润表", cash_flow:"现金流量表"};
+    const ok = dg.kinds && dg.kinds[k];
+    return (ok ? "✓ " : '<span class="bad">✗ </span>') + names[k];
+  }).join("　"));
+
+  h += row(dg.unit
+    ? "金额单位：" + esc(dg.unit) + (dg.unit_basis ? '　<span class="mut">依据：' + esc(dg.unit_basis) + '</span>' : "")
+    : '金额单位：<span class="bad">未识别 —— 会导致金额相差 1000 倍，需由你声明</span>');
+
+  if(dg.rates && dg.rates.length){
+    h += row("字段映射：" + dg.rates.map(r =>
+      esc(r.table) + " " + r.mapped + "/" + r.rows).join("　·　"));
+  }
+
+  // ② 为什么 —— 后端给的判据，照实说
+  (dg.hints || []).forEach(x => { h += hint(esc(x)); });
+
+  // ③ 技术细节折叠起来，不占版面
+  const extra = [];
+  (dg.unused || []).forEach(x => extra.push("未采用：" + x));
+  (dg.notes || []).forEach(x => extra.push(x));
+  (dg.warnings || []).forEach(x => extra.push("⚠ " + x));
+  if(extra.length){
+    h += `<details style="margin-top:7px"><summary class="dgrow" style="cursor:pointer">`
+       + "技术细节（" + extra.length + " 条）</summary>"
+       + extra.map(x => `<div class="dgrow" style="padding-left:10px">${esc(x)}</div>`).join("")
+       + "</details>";
+  }
+  box.innerHTML = h;
+}
+
+function renderTables(d){
+  let h = '<table><thead><tr><th>' + t("th.statement") + '</th><th>' + t("th.source") +
+          '</th><th class="num">' + t("th.mapped") + '</th><th>' + t("th.status") +
+          '</th></tr></thead><tbody>';
+  for(const x of d.tables){
+    h += '<tr><td>' + esc(x.label) + '</td><td class="mut">' + esc(x.file || "—") + '</td>' +
+         '<td class="num mut">' + (x.rows ? x.mapped + " / " + x.rows : "—") + '</td>' +
+         '<td>' + (x.found ? '<span class="ok">■ ' + t("st.found") + '</span>'
+                           : '<span class="bad">■ ' + t("st.missing") + '</span>') + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  if(d.unused && d.unused.length){
+    h += '<div class="notice" style="margin:12px 0 0"><b>' + t("unused.head") + '</b><br>' +
+         d.unused.map(u => "· " + esc(u)).join("<br>") + '</div>';
+  }
+  $("tables").innerHTML = h;
+}
+
+function renderChecks(d){
+  let h = '<table><thead><tr><th>' + t("chk.head") + '</th><th>' + t("chk.result") +
+          '</th></tr></thead><tbody>';
+  for(const c of d.checks){
+    const v = c.ok === true ? '<span class="ok">■ ' + t("chk.ok") + '</span>'
+            : c.ok === false ? '<span class="bad">■ ' + t("chk.bad") + '</span>'
+            : c.applicable ? '<span class="warn">■ ' + t("chk.na") + '</span>'
+            : '<span class="mut">■ ' + t("chk.nr") + '</span>';
+    h += '<tr><td>' + esc(c.name) + '</td><td>' + v + '</td></tr>';
+  }
+  h += '</tbody></table>';
+  const dups = (d.warnings || []).filter(w => w.indexOf("个取值") >= 0).length;
+  if(dups) h += '<div class="notice issue" style="margin-top:12px">' +
+                esc(t("chk.dups").replace("{n}", dups)) + '</div>';
+  // 映射率过低 —— 这条比"勾稽平不平"更靠前：表没读懂时，勾稽可能照样平。
+  // 引擎的中文原话直接显示（界面层不重写引擎的判断）。
+  const mp = d.mapping_warnings || [];
+  if(mp.length) h += '<div class="notice issue" style="margin-top:12px">' +
+                     mp.map(w => esc(w)).join("<br>") + '</div>';
+  $("checks").innerHTML = h;
+}
+
+function renderMeta(d){
+  $("meta").innerHTML =
+    '<div class="kv">' + t("meta.basis") + '：<b>' + esc(d.gaap || "—") + '</b> · <b>' +
+    esc(d.scope || "—") + '</b> · <b>' + esc(d.audited || "—") + '</b>　｜　' +
+    t("meta.period") + ' <b>' + esc(d.period || "—") + '</b> <span class="mut">（' +
+    t("meta.fix") + '）</span></div>' +
+    (d.notes && d.notes.length
+      ? '<div class="kv mut" style="margin-top:8px">' +
+        d.notes.map(n => "· " + esc(n)).join("<br>") + '</div>' : '');
+}
+
+function renderUnit(d){
+  $("unitBox").innerHTML =
+    '<div class="grid3"><div><label class="kv">' + t("unit.label") +
+    ' <b class="warn">' + t("unit.warn") + '</b></label>' +
+    '<input type="text" id="unit" value="' + esc(d.unit || "") +
+    '" placeholder="元 / 千元 / 万元 / 千美元 / RMB / RMB thous. / USD thous."></div>' +
+    '<div class="kv" style="align-self:end">' +
+    (d.unit ? t("unit.basis") + esc(d.unit_basis || "")
+            : '<span class="bad">■ ' + t("unit.unknown") + '</span>') +
+    '</div></div>';
+}
+
+// 引擎的问题标签里带 markdown 的 **加粗**（那是给 txt 清单排版用的），
+// 网页里要转成真加粗 —— 不然界面上会看到一对星号。
+function md(s){ return esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>"); }
+
+// **能确定的就不要人打字**：
+//   封闭集合（买方/卖方/中立…）→ 下拉，只能选
+//   建议值（元/千元/千美元…）→ 可编辑下拉，能点选也能自己写
+//   其余 → 普通输入框
+function field(q){
+  const k = esc(q.key), v = q.default || "";
+  const opts = q.options || [], sug = q.suggest || [];
+  if(opts.length){
+    const has = opts.indexOf(v) >= 0;
+    let h = '<select data-key="' + k + '">';
+    // 当前值不在选项里（材料推出来一个不常见的写法）时，把它补进去，
+    // 否则下拉会显示成空白 —— 用户会以为数据丢了。
+    if(v && !has) h += '<option value="' + esc(v) + '" selected>' + esc(v) + '</option>';
+    for(const o of opts){
+      h += '<option value="' + esc(o) + '"' + (o === v ? " selected" : "") + '>' + esc(o) + '</option>';
+    }
+    return h + '</select>';
+  }
+  if(sug.length){
+    const id = "dl-" + q.key;
+    return '<input type="text" spellcheck="false" list="' + id + '" data-key="' + k +
+           '" value="' + esc(v) + '"><datalist id="' + id + '">' +
+           sug.map(s => '<option value="' + esc(s) + '"></option>').join("") + '</datalist>';
+  }
+  const inp = '<input type="text" spellcheck="false" data-key="' + k +
+              '" value="' + esc(v) + '">';
+  // 百分比字段：% 默认显示在框里（人只填数值）；提交后由引擎把值补成 "8.5%" 再读。
+  // 界面上不自己乘除 —— 算术和单位转换都不该发生在显示层。
+  return q.unit === "%"
+    ? '<span class="pctwrap">' + inp + '<i class="pctsuf">%</i></span>'
+    : inp;
+}
+
+// 这个数**从哪来**。分不清来源，人就会把"公司之外要自己找的数"当成工具该给的数。
+const ORIGIN = {
+  "财报":     {cls: "filing",   key: "origin.filing"},
+  "财报推算": {cls: "derived",  key: "origin.derived"},
+  "外部":     {cls: "external", key: "origin.external"},
+  "判断":     {cls: "judgment", key: "origin.judgment"}
+};
+function originTag(o){
+  const m = ORIGIN[o];
+  return m ? '<i class="org ' + m.cls + '">' + t(m.key) + '</i>' : "";
+}
+
+function renderQuestions(d){
+  let g = "", h = "";
+  for(const q of d.questions){
+    if(q.group !== g){ g = q.group; h += '<h3 class="grp">' + esc(g) + '</h3>'; }
+    const ref = q.reference ? '　｜ <b>参考 / ref</b>：' + esc(q.reference) : "";
+    // 百分比字段先说清写法：只填数值，% 已经显示在框里
+    const pct = q.unit === "%" ? '<b>' + t("unit.pct") + '</b>　' : "";
+    h += '<div class="q"><label>' + originTag(q.origin) + md(q.label) +
+         '<span class="hint">' + pct + md(q.hint || "") + ref + '</span></label>' +
+         field(q) + '</div>';
+  }
+  $("questions").innerHTML = h;
+}
+
+function go(){
+  if(DEMO_DONE){
+    $("missing").innerHTML = '<div class="notice">' + t("demo.go") + '</div>';
+    $("card6").classList.remove("hide");
+    $("card6").scrollIntoView({behavior:"smooth", block:"start"});
+    return;
+  }
+  $("goBtn").disabled = true;
+  const answers = {};
+  // 下拉和输入框都要收 —— 做成下拉的字段不能因为选择器漏了而被丢掉
+  document.querySelectorAll("#questions input, #questions select").forEach(i => {
+    if(i.value.trim()) answers[i.dataset.key] = i.value.trim();
+  });
+  const u = $("unit") ? $("unit").value.trim() : "";
+  post("/api/appraise", {path:STATE.path, unit:u, answers:answers}).then(d => {
+    $("goBtn").disabled = false;
+    $("card6").classList.remove("hide");
+    if(!d.ok){
+      $("missing").innerHTML = '<div class="notice issue"><b>' + esc(d.error || t("err.fail")) +
+                               '</b></div>';
+      $("report").textContent = "";
+      $("card6").scrollIntoView({behavior:"smooth"});
+      return;
+    }
+    $("outDir").textContent = t("out.prefix") + d.out_dir;
+    $("missing").innerHTML = d.missing.length
+      ? '<div class="notice"><b>' + t("miss.head") + '</b><br>' +
+        d.missing.map(x => "· " + esc(x)).join("<br>") + '</div>' : "";
+    $("report").textContent = d.report;
+    $("card6").scrollIntoView({behavior:"smooth", block:"start"});
+  }).catch(e => {
+    $("goBtn").disabled = false;
+    $("missing").innerHTML = '<div class="notice issue">' + esc(String(e)) + '</div>';
+  });
+}
+
+// 服务是旧进程时，说清楚「为什么」和「怎么办」——
+// 不让用户对着 `unknown endpoint` 猜（这个坑真踩过：页面更新了、服务没重启）。
+function showStale(){
+  $("stale").classList.remove("hide");
+  ["pickDir", "pickFile"].forEach(id => {
+    const el = $(id);
+    if(el) el.disabled = true;
+  });
+  const dl = $("docLink");
+  if(dl) dl.title = t("nav.docstale");
+}
+
+// ── 启动：有后端就等人操作；没后端（双击打开、聊天里预览）自动进设计预览 ──
+// 第 4 步的「对照指标」随**标的所在市场**换一套 ——
+// 美股走 SEC EDGAR（CAGR / EBITDA 率 / 各种倍数），A 股走东财（**没有 EBITDA 率**，
+// 因为东财没有折旧字段），港股走东财港股 F10（净利率 / 毛利率 / 收入同比；
+// 倍数用**源算好的** PE、PB —— 那张表里市值是港元、利润是人民币，自己相除会错）。
+// 一张下拉全列出来、用不上的**藏起来** —— 免得选了才看到报错。
+const METRICS_BY_MARKET = {
+  hk: ["op_margin","net_margin","gross_margin","revenue_yoy","revenue_scale","pe","pb"],
+};
+const METRICS_DEFAULT = ["revenue_cagr","ebitda_margin","revenue_scale","op_margin",
+                         "pe","pb","price_to_revenue","ev_ebitda","ev_ebit","ev_revenue"];
+function applyMetricOptions(){
+  const sel = $("cMetric");
+  if(!sel) return;
+  const mkt = ($("cMkt") && $("cMkt").value) || "";
+  const allow = METRICS_BY_MARKET[mkt] || METRICS_DEFAULT;
+  let firstShown = null;
+  sel.querySelectorAll("option").forEach(o => {
+    const ok = allow.indexOf(o.value) >= 0;
+    o.hidden = !ok;
+    o.disabled = !ok;
+    if(ok && !firstShown) firstShown = o;
+  });
+  // 当前选中的那个被藏了，就落到第一个能用的 —— 不留一个"看不见的选项"生效。
+  // 只用 `value` 判断（不碰 `selectedOptions`：那是浏览器专有，桩里没有，
+  // 而"选中的被藏了"这件事用 value 一样判断得出来）。
+  if(firstShown && allow.indexOf(sel.value) < 0){
+    sel.value = firstShown.value;
+  }
+}
+function boot(){
+  applyLang(LANG);
+
+  // 入口：默认「估值」—— 老流程一个字都不变。两件事一定是**人选的**，不替他猜。
+  //
+  // ★ 这句**必须**在 boot() 里，不能放在文件中间的顶层：
+  // `STATE` 是 `const`，声明在文件末尾 —— 顶层引用它会撞上"暂时性死区"，
+  // 抛 ReferenceError 把整个脚本打断，**后面的初始化（i18n、遮罩、按钮绑定）全不执行**。
+  // 真踩过：页面变成全白、连按钮都没有。`node --check` 查不出来（那是语法检查，
+  // 这是运行期错误）。凡是"上屏要做的事"，一律进 boot()。
+  setMode(STATE.mode || "appraise");
+  wireDrop();
+  applyMetricOptions();
+  const mk = $("cMkt");
+  if(mk) mk.addEventListener("change", applyMetricOptions);
+  wireOnbLang();
+  document.querySelectorAll(".lang button").forEach(b => {
+    b.addEventListener("click", () => applyLang(b.dataset.lang));
+  });
+  if(DEMO){
+    // 没有后端时，说明文件就在旁边这个文件里 —— 别指到 /doc 去撞 404
+    const dl = $("docLink");
+    if(dl) dl.setAttribute("href", "webapp_doc.html");
+    demo();
+    return;
+  }
+  const timer = setTimeout(() => demo(), 1800);
+  fetch("/api/health", {cache:"no-store"}).then(r => r.json()).then(h => {
+    const eps = (h && h.endpoints) || [];
+    const pages = (h && h.pages) || [];
+    const feats = (h && h.features) || [];
+    VER = (h && h.version) || "";
+    setVer();
+    onbMaybeStart(h && h.usage);   // 第一次打开且没用过：先讲三句
+    // 接口、页面、**能力标记**逐条核对：少任何一条都说明跑着的是旧进程。
+    // 能力标记这一类是后补的 —— 百分比字段加进来但没重启时，
+    // 页面上那些框会**静默地没有 %**，用户根本不知道填 5 还是 0.05。
+    if(eps.indexOf("pick") < 0 || pages.indexOf("doc") < 0 ||
+       feats.indexOf("percent-unit") < 0) showStale();
+  }).catch(() => demo()).finally(() => clearTimeout(timer));
+}
+const STATE = { path:"", unit:"", data:null };
+
+// ── 首次引导 ──
+// 三屏，铺满屏，看完记住。**只在第一次打开时跳出来** ——
+// 天天用的功能不该每次都被一段介绍挡着（那是骚扰，不是引导）。
+function onbShow(i){
+  ONB_I = i;
+  const n = 4;
+  const last = (i === n - 1);
+  $("onbTitle").innerHTML = t("onb." + (i+1) + ".t");
+  $("onbBody").innerHTML = t("onb." + (i+1) + ".b");
+  $("onbNext").textContent = last ? t("onb.start") : t("onb.next");
+  $("onbSkip").textContent = t("onb.skip");
+  // 最后一屏：**把"跳过""下一步"收起来，换成两条路的选择** ——
+  // "做什么"必须由人选，不给默认。
+  $("onbMode").classList.toggle("hide", !last);
+  $("onbNext").classList.toggle("hide", last);
+  $("onbSkip").classList.toggle("hide", last);
+  const idx = $("onbIdx");
+  if(idx) idx.textContent = String(i+1).padStart(2, "0") + " / " +
+                            String(n).padStart(2, "0");
+  document.querySelectorAll("#onbDots i").forEach((el, k) =>
+    el.classList.toggle("on", k <= i));
+  document.querySelectorAll("[data-onblang]").forEach(b =>
+    b.classList.toggle("on", b.dataset.onblang === LANG));
+  $("onb").classList.remove("hide");
+  document.body.style.overflow = "hidden";       // 引导开着时别让背后滚动
+}
+
+function onbNext(){
+  if(ONB_I >= 3){ onbDone(); return; }     // 最后一屏（04）正常不会走到这里
+  onbShow(ONB_I + 1);
+}
+
+function onbSkip(){ onbDone(); }
+
+function onbDone(){
+  $("onb").classList.add("hide");
+  document.body.style.overflow = "";
+  try { localStorage.setItem(ONB_KEY, "1"); } catch(e){ /* 私密模式：不强求 */ }
+  // 回记到**服务端**（按这台机器记，不按浏览器记）—— 端口换了、缓存清了都不再重弹。
+  // 记不上也不打扰人：引导本身已经完成了。
+  try {
+    fetch("/api/onboarded", {method:"POST",
+      headers:{"Content-Type":"application/json"}, body:"{}"});
+  } catch(e){ /* 老服务没有这个接口时静默跳过 */ }
+}
+
+// 键盘：← → 翻页、Esc 跳过、回车下一步（提示就写在弹层里，不能写了不生效）
+function onbKey(e){
+  const el = $("onb");
+  if(!el || el.classList.contains("hide")) return;
+  if(e.key === "ArrowRight" || e.key === "Enter"){ onbNext(); e.preventDefault(); }
+  else if(e.key === "ArrowLeft"){ if(ONB_I > 0) onbShow(ONB_I - 1); e.preventDefault(); }
+  else if(e.key === "Escape"){ onbDone(); e.preventDefault(); }
+}
+
+// 引导里的语言开关（弹层盖住了页头那个，所以弹层里必须自己有一个）
+function wireOnbLang(){
+  document.querySelectorAll("[data-onblang]").forEach(b =>
+    b.addEventListener("click", () => applyLang(b.dataset.onblang)));
+  document.addEventListener("keydown", onbKey);
+  // 点遮罩空白处也能退出 —— 全屏遮罩**绝不允许把人关在里面**（踩过：CSS 让 hide 失效，
+  // 于是按键全死、关不掉）。多加一条不依赖任何状态的退路。
+  const el = $("onb");
+  if(el) el.addEventListener("click", e => { if(e.target === el) onbDone(); });
+}
+
+//: 切语言时引导若正开着，把它也换成对应语言（否则中英混在同一屏里）
+function onbRelang(){
+  const el = $("onb");
+  if(el && !el.classList.contains("hide")) onbShow(ONB_I);
+}
+
+//: 该不该出现？看三件事，**依据是"这台机器上用过没有"，不是"这个浏览器记没记住"**：
+//:   ① 服务端：出过估值（runs > 0）→ **用过就不用教**
+//:   ② 服务端：引导回记过（onboarded）→ 看过就不必再看
+//:   ③ 浏览器：localStorage（服务端状态读不到时的兜底）
+//: 三个都为否才弹。这样端口换了（浏览器眼里是新站点）不会重弹，
+//: 反过来已经跑过一份估值的人也不会被拦一次教学。
+function onbMaybeStart(u){
+  u = u || {};
+  //: `?onb=0` 永不弹 —— 万一将来又出"关不掉"，人还有一条不带任何依赖的退路。
+  if(location.search.indexOf("onb=0") >= 0) return;
+  let seen = "";
+  try { seen = localStorage.getItem(ONB_KEY) || ""; } catch(e){ seen = ""; }
+  if(u.onboarded || (u.runs || 0) > 0 || seen) return;
+  onbShow(0);
+}
+
+boot();
+</script>
+</div>
+</body></html>
