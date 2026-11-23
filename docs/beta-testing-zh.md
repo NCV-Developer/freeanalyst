@@ -47,21 +47,35 @@
 
 ---
 
-## 三、安装
+## 三、安装与首次运行（已实测）
 
 ```bash
-# 需要 Python 3.12（其他版本没测过）
-/usr/local/bin/python3.12 -m pip install pdfplumber
-
-git clone <仓库地址>
+git clone https://github.com/NCV-Developer/freeanalyst.git
 cd freeanalyst
-
-# 跑一份年报
-python3.12 freeanalyst.py appraise <年报.pdf>
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt     # 只有 pdfplumber 一个依赖
+.venv/bin/python freeanalyst.py doctor        # 环境自检
 ```
 
-**已知环境坑**：pdfplumber 只装在 3.12 的用户目录里。如果报
-`PdfDependencyMissing`，先确认你用的是不是 3.12。
+把一份或多份年报 PDF 放进一个目录，然后：
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/目录 --out /tmp/out
+```
+
+**注意：`appraise` 收的是目录，不是单个 PDF。**
+
+它会打印每张表映射了多少行、单位、合并口径，并生成一份问答清单
+`/tmp/out/估值问答.txt`。把里面要的假设填上（**空着的它不会替你猜**），再跑一次：
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/目录 --out /tmp/out \
+    --answers /tmp/out/估值问答.txt
+```
+
+**取数和对账不需要下载任何模型**；抓可比公司才需要联网。
+
+**已知环境坑**：如果报 `PdfDependencyMissing`，先确认你用的是不是 3.12。
 
 ---
 

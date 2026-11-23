@@ -82,14 +82,42 @@ industry codes rather than company names.
 
 ## Install
 
-Requires **Python 3.12** and `pdfplumber` (the only optional dependency).
+Requires **Python 3.12**. The only third-party dependency is `pdfplumber`;
+everything else is the standard library.
 
 ```bash
-/usr/local/bin/python3.12 -m pip install pdfplumber
 git clone https://github.com/NCV-Developer/freeanalyst.git
 cd freeanalyst
-python3.12 freeanalyst.py appraise <annual-report.pdf>
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python freeanalyst.py doctor        # environment self-check
 ```
+
+Verified on a clean clone: `doctor` prints your Python version, available local
+models and the audit log location.
+
+## First run
+
+Put one or more annual-report PDFs in a folder, then:
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/folder --out /tmp/out
+```
+
+**`appraise` takes a directory, not a single PDF.** It prints the statement
+extraction result (rows mapped per statement, unit, consolidation scope) and
+writes a question list to `/tmp/out/估值问答.txt`.
+
+Fill in the assumptions it asks for (it never guesses them for you), then run it
+again with `--answers`:
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/folder --out /tmp/out \
+    --answers /tmp/out/估值问答.txt
+```
+
+Extraction and reconciliation work without any model download. Fetching market
+comparables requires network access to public data sources.
 
 If you hit `PdfDependencyMissing`, check the interpreter version first.
 

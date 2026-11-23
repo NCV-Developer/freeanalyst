@@ -42,17 +42,36 @@ you. **This is intentional.**
 **These produce a clear "this document cannot be parsed" message, not a fabricated
 number.**
 
-## 3. Install
+## 3. Install and first run (verified on a clean clone)
 
 ```bash
-/usr/local/bin/python3.12 -m pip install pdfplumber
 git clone https://github.com/NCV-Developer/freeanalyst.git
 cd freeanalyst
-python3.12 freeanalyst.py appraise <annual-report.pdf>
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt     # pdfplumber is the only dependency
+.venv/bin/python freeanalyst.py doctor        # environment self-check
 ```
 
-Known environment trap: `pdfplumber` is installed only for Python 3.12. If you see
-`PdfDependencyMissing`, check your interpreter version before anything else.
+Put one or more annual-report PDFs in a folder, then:
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/folder --out /tmp/out
+```
+
+**`appraise` takes a directory, not a single PDF.** It prints rows mapped per
+statement, unit and consolidation scope, and writes a question list to
+`/tmp/out/估值问答.txt`. Fill in the assumptions (it never guesses them), then:
+
+```bash
+.venv/bin/python freeanalyst.py appraise /path/to/folder --out /tmp/out \
+    --answers /tmp/out/估值问答.txt
+```
+
+Extraction and reconciliation need **no model download**; market comparables need
+network access.
+
+Known environment trap: if you see `PdfDependencyMissing`, check your interpreter
+version before anything else.
 
 ## 4. The feedback we actually want
 
