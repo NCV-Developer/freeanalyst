@@ -2,6 +2,8 @@
 
 **Open source. Air gapped. Off at six.**
 
+[English README](README.en.md) · [Beta testing guide (EN)](docs/Beta-Testing.md)
+
 自由分析师 · 免费分析师
 
 ---

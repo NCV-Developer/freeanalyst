@@ -1,0 +1,81 @@
+# FreeAnalyst Beta Testing Guide (v0.2.0, 2026-11-22)
+
+[Chinese version](内测说明.md)
+
+**Please read this before you start: what this build can and cannot do.**
+
+---
+
+## 1. What it does
+
+For **A-share annual reports (text-layer PDF, non-financial companies)**, it
+extracts 18 key line items from the three financial statements and labels every
+number with a confidence level.
+
+- **High confidence** — reconciled with an independent source (listed companies),
+  or internally consistent (private documents). You can use it directly.
+- **Low confidence** — consolidated/parent evidence conflicts, or the external
+  source disagrees. **Verify by hand**; candidate values and page numbers are given.
+- **Rejected** — not extracted, or the document is out of scope. Do not use any
+  number it might show; handle the document manually.
+
+Measured on 33 filings from 20 companies:
+
+```
+Listed companies   high-confidence coverage 91%   accuracy 100%
+Private documents  high-confidence coverage 40%   accuracy 99.1%
+```
+
+With private documents there is no external source to reconcile against, so only
+40% of fields get a confident answer and the rest are explicitly handed back to
+you. **This is intentional.**
+
+## 2. Do not test these (they will be rejected at file level)
+
+- Scanned / image-only PDFs
+- Banks, insurers, brokers
+- US 10-K filings
+- Hong Kong filings
+- English-language annual reports
+- T-shaped two-column layouts, encrypted PDFs
+
+**These produce a clear "this document cannot be parsed" message, not a fabricated
+number.**
+
+## 3. Install
+
+```bash
+/usr/local/bin/python3.12 -m pip install pdfplumber
+git clone https://github.com/NCV-Developer/freeanalyst.git
+cd freeanalyst
+python3.12 freeanalyst.py appraise <annual-report.pdf>
+```
+
+Known environment trap: `pdfplumber` is installed only for Python 3.12. If you see
+`PdfDependencyMissing`, check your interpreter version before anything else.
+
+## 4. The feedback we actually want
+
+This is **not** "please ask us to support more document types".
+
+1. **Are rejection reasons understandable?** When it says "this document cannot be
+   parsed", do you know what to do next?
+2. **Are low-confidence hints useful?** Do the candidate values and page numbers
+   let you verify quickly?
+3. **Did installation go smoothly?** Where did it break?
+4. **Any number marked high confidence that is actually wrong?** — This is the
+   most important one. The design goal is "what it commits to must be right";
+   please report every single case.
+
+## 5. Known issues (no need to report again)
+
+- Vanke (000002) operating cash flow: our value +5.86bn vs. the reference -0.99bn;
+  the sign is wrong and internal evidence did not catch it. On the fix list.
+- Gree (000651): statements not located, file-level rejection.
+- Sinopec (600028), CITIC Securities (600030), Ping An (601318): file-level
+  rejection for insufficient coverage.
+
+---
+
+**In one sentence: the value of this build is not "it parses everything", but
+"what it says it can do, you can trust; what it cannot, it tells you".**
