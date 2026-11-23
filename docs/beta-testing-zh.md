@@ -2,6 +2,8 @@
 
 [English beta testing guide](Beta-Testing.md)
 
+> 中文文件名已改为 beta-testing-zh.md
+>
 > 给参与内测的朋友：**这版能做什么、不能做什么，先看这个再动手。**
 
 ---

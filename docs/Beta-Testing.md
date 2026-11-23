@@ -1,6 +1,6 @@
 # FreeAnalyst Beta Testing Guide (v0.2.0, 2026-11-22)
 
-[Chinese version](内测说明.md)
+[Chinese version](beta-testing-zh.md)
 
 **Please read this before you start: what this build can and cannot do.**
 
