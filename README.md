@@ -53,6 +53,24 @@ Taiwan cash flow statements use the **indirect method**, so "cash received from
 sales" and "cash paid for goods" do not exist there — those two items are marked
 **not applicable**, not failures. The same applies to HK/US/SG filings.
 
+## Singapore (SGX) — validated on real filings
+
+Verified against real SGX annual reports supplied by a user:
+
+- **9R Limited FY2026 and FY2023: 15/16 applicable items**, including the correct
+  loss figure (-2,597,300) and matching cash/cash-equivalents across statements.
+- One other issuer: 10/16 (report denominated in S$'000).
+- **CRCT (a REIT): not yet supported** — its statement layout is not extracted.
+
+Four real bugs were found and fixed by this validation: page/note numbers being
+read as amounts, current-period values packed into the label cell, matches taken
+from MD&A or notes instead of the primary statements, and missing vocabulary
+(`Revenue`, `Trade receivables`, `Loss for the year`, `at end of`).
+
+**Operating profit is not applicable for many IFRS issuers** (no subtotal row).
+Automatic download from SGX is not wired up yet — place the PDF in a folder and
+run `appraise` on it.
+
 ## What it refuses to parse (file-level rejection, with a reason)
 
 - Scanned / image-only PDFs (OCR path not yet reliable)

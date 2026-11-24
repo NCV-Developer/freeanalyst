@@ -23,24 +23,25 @@ import re
 #: 科目 → （匹配模式, 排除模式）。按顺序取第一个命中的行，**取本期那一列**。
 ITEM_MAP: dict[str, tuple[str, str | None]] = {
     "货币资金": (r"Cash and cash equivalents", r"期末|期初|帳列"),
-    "应收账款": (r"Accounts receivable|Notes and accounts receivable", None),
+    "应收账款": (r"Accounts receivable|Notes and accounts receivable|Trade receivables", None),
     "存货": (r"Inventories", r"Adjustments|decrease|increase"),
     "流动资产合计": (r"Total current assets", None),
     "非流动资产合计": (r"Total non-current assets", None),
     "资产总计": (r"Total assets", None),
     "流动负债合计": (r"Total current liabilities", None),
     "负债合计": (r"Total liabilities", r"and equity"),
-    "营业收入": (r"Total operating revenue|Operating revenue", None),
-    "营业成本": (r"Total operating costs|Operating costs", None),
+    "营业收入": (r"Total operating revenue|Operating revenue|^Revenue\b", None),
+    "营业成本": (r"Total operating costs|Operating costs|Cost of sales", None),
     # 台湾写「營業利益 Net operating income (loss)」
     "营业利润": (r"Net operating income|Operating income|Operating profit|Profit from operations", None),
-    "净利润": (r"Profit \(loss\)", r"continuing|before tax|attributable"),
+    "净利润": (r"Profit \(loss\)|Profit for the (financial )?year|Profit for the period|Net profit|Loss for the (year|period)|Loss for the financial year",
+               r"continuing|before tax|attributable|comprehensive"),
     # 台湾写「營業活動之淨現金流入(流出) Net cash flows from (used in) operating activities」
     # —— 中间插了 "(used in)"，所以不能要求 from 后面紧跟 activities 类名
     "经营活动产生的现金流量净额": (r"Net cash .*?operating activities", None),
     "投资活动产生的现金流量净额": (r"Net cash .*?investing activities", None),
     "筹资活动产生的现金流量净额": (r"Net cash .*?financing activities", None),
-    "期末现金及现金等价物余额": (r"期末現金及約當現金餘額|Cash and cash equivalents at the? ?end", None),
+    "期末现金及现金等价物余额": (r"期末現金及約當現金餘額|Cash and cash equivalents at (the )?end", None),
 }
 
 #: 台湾**不适用**的科目（间接法没有这两行）

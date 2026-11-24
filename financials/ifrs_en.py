@@ -64,10 +64,73 @@ def extract_text(text: str) -> dict[str, float]:
     return out
 
 
+def _row_value(row, idx: int) -> float | None:
+    """从一行里取**本期**值。
+
+    实测 9R 年报的两种行形态：
+        ['Revenue', '4', '13,636,473', '14,701,312']      → 跳过附注号 4
+        ['Inventories 16 1,065,513', '692,117', '–']      → 本期挤在标签格里
+    """
+    # ① 标签格里就带数字（「科目 附注 本期」挤一格）→ 尾部那个数是本期
+    head = str(row[0])
+    m = re.search(r"(\(?-?\d[\d,]*(?:\.\d+)?\)?)\s*$", head)
+    if m:
+        v = _num(m.group(1))
+        if v is not None and abs(v) >= 1000:
+            return v
+    # ② 否则在后续列里找第一个「像金额」的，**跳过附注号**（小整数）
+    for c in row[1:]:
+        v = _num(str(c))
+        if v is not None and (abs(v) >= 1000 or "," in str(c)):
+            return v
+    return None
+
+
 def extract_pdf(doc) -> dict[str, float]:
-    """从 `ingest.pdf.extract_pdf()` 的文档里取（按页拼接，**只取首次出现**）。"""
+    """从 PDF 里取（**按表格行 + 列角色**，不是"标签后第一个数字"）。
+
+    实测（9R Limited / CRCT 真实年报）：按文本行取会把**页码和附注号**当金额 ——
+    货币资金取出 31、存货取出 16、资产总计取出 24。所以必须走
+    `from_pdf.page_rows()` 的表格行，并用 `ingest.columns` 判哪一列是本期。
+    """
+    from ingest import columns as _cols
+    from . import from_pdf as _fp
+
     out: dict[str, float] = {}
+    # **只在主表页取值。** 9R 实测：全文档「首次出现优先」会取到 MD&A 与附注里的
+    # 同名科目 —— 营业成本取出 14,244,770（实际是别处的数），净利润取出正数
+    # （而这家公司当年是亏损 -2,597,300）。主表标题页及其续页以外的行一律不碰。
+    main_pages: set[int] = set()
     for pg in doc.pages:
-        for k, v in extract_text(pg.raw_text or "").items():
-            out.setdefault(k, v)
+        t = (pg.raw_text or "").upper()
+        if any(k in t for k in (
+                "STATEMENT OF FINANCIAL POSITION", "STATEMENTS OF FINANCIAL POSITION",
+                "PROFIT OR LOSS", "INCOME STATEMENT", "BALANCE SHEET",
+                "STATEMENT OF CASH FLOWS", "STATEMENTS OF CASH FLOWS",
+                "STATEMENT OF COMPREHENSIVE INCOME")):
+            main_pages.add(pg.number)
+            main_pages.add(pg.number + 1)          # 主表常跨两页
+
+    for pg in doc.pages:
+        if pg.number not in main_pages:
+            continue
+        rows = _fp.page_rows(pg)
+        if not rows:
+            continue
+        roles = _cols.detect(rows)
+        idx = roles.primary if (roles.ok and roles.primary is not None) else 1
+        for row in rows:
+            if not row:
+                continue
+            label = str(row[0])
+            for item, (pat, excl) in ITEM_MAP.items():
+                if item in out:
+                    continue
+                if not re.search(pat, label, re.IGNORECASE):
+                    continue
+                if excl and re.search(excl, label, re.IGNORECASE):
+                    continue
+                v = _row_value(row, idx)
+                if v is not None:
+                    out[item] = v
     return out
