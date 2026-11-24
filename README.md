@@ -41,13 +41,13 @@ low-confidence or rejected. **That is the design, not a malfunction.**
 ## Taiwan listed companies (via MOPS)
 
 ```bash
-.venv/bin/python freeanalyst.py fetch 2330 --market tw --period 2025
+.venv/bin/python freeanalyst.py fetch <代码> --market tw --period 2025
 ```
 
 Taiwan filings come from **MOPS (Market Observation Post System)** as structured
 HTML with **bilingual Chinese/English standard captions**, so account mapping is a
-lookup rather than a guess. **16/16 applicable items** extracted for TSMC (2330)
-and MediaTek (2454); values are in NT$ thousands.
+lookup rather than a guess. **16/16 applicable items** extracted for one Taiwan semiconductor issuer
+and another Taiwan semiconductor issuer; values are in NT$ thousands.
 
 Taiwan cash flow statements use the **indirect method**, so "cash received from
 sales" and "cash paid for goods" do not exist there — those two items are marked
@@ -55,7 +55,7 @@ sales" and "cash paid for goods" do not exist there — those two items are mark
 
 ## Hong Kong — traditional-Chinese annual reports
 
-Verified against Tencent (00700) FY2025: **15/16 applicable items**, with
+Verified against a large HK-listed internet issuer's FY2025 annual report: **15/16 applicable items**, with
 articulation intact (current assets 595,460 + non-current 1,443,526 = total
 assets 2,038,986; revenue 751,766; net profit 229,801; cash equals closing cash).
 
@@ -67,16 +67,16 @@ Two HK-specific behaviours are handled:
 - **Five-year financial-summary pages are excluded** from statement detection, or
   older years get picked up as the current period.
 
-HK issuers also filing with the SEC (e.g. Alibaba 09988/BABA) go through the
+HK issuers also filing with the SEC (e.g. one HK/US dual-listed issuer) go through the
 20-F + official XBRL route instead (14/16 with official values).
 
-Xiaomi (01810) is a different problem: its text layer is `(cid:xxxx)` encoded
+one HK issuer is a different problem: its text layer is `(cid:xxxx)` encoded
 (font subset with no Unicode map), so it needs OCR, not the table parser.
 
 ## United States (SEC EDGAR) — 16/16 via official XBRL
 
 ```bash
-.venv/bin/python freeanalyst.py fetch AAPL --market us --kind 10-K --period 2025
+.venv/bin/python freeanalyst.py fetch <ticker> --market us --kind 10-K --period 2025
 ```
 
 Two independent pieces, both verified:
@@ -85,7 +85,7 @@ Two independent pieces, both verified:
   resolution returned identities without a CIK, producing `CIK0000000000.json`
   404s; the CIK is now looked up from the SEC ticker table when missing.)
 - **Extraction**: values come from the SEC's **official XBRL `companyconcept`
-  endpoint**, not from parsing HTML. Apple FY2025: **16/16 items** — revenue
+  endpoint**, not from parsing HTML. one large US technology issuer FY2025: **16/16 items** — revenue
   $416,161M, net income $112,010M, total assets $359,241M, cash $35,934M.
 
 The same official data doubles as an independent source for reconciliation.
@@ -94,10 +94,10 @@ The same official data doubles as an independent source for reconciliation.
 
 Verified against real SGX annual reports supplied by a user:
 
-- **9R Limited FY2026 and FY2023: 15/16 applicable items**, including the correct
+- **two fiscal years of one SGX-listed issuer: 15/16 applicable items**, including the correct
   loss figure (-2,597,300) and matching cash/cash-equivalents across statements.
 - One other issuer: 10/16 (report denominated in S$'000).
-- **CRCT (a REIT): not yet supported** — its statement layout is not extracted.
+- **One REIT: not yet supported** — its statement layout is not extracted.
 
 Four real bugs were found and fixed by this validation: page/note numbers being
 read as amounts, current-period values packed into the label cell, matches taken
@@ -114,7 +114,7 @@ run `appraise` on it.
 - Financial institutions: banks, insurers, brokers (different chart of accounts)
 - English-language annual reports (statement location usually fails)
 - T-shaped two-column layouts, encrypted PDFs
-- PDFs whose text layer is `(cid:xxxx)` encoded (e.g. Xiaomi 01810) — needs OCR
+- PDFs whose text layer is `(cid:xxxx)` encoded (one HK issuer) — needs OCR
 
 **A file-level rejection also fires when fewer than half of the 18 key items can
 be extracted** — the tool does not need to recognise *why* a document is hard in
@@ -203,9 +203,9 @@ reported together** — accuracy alone can be gamed by rejecting everything.
 
 ## Known limitations (please do not re-report)
 
-- One Vanke (000002) operating cash flow figure has the wrong sign; internal
+- One one large-cap issuer operating cash flow figure has the wrong sign; internal
   evidence did not catch it. On the fix list.
-- Gree (000651), Sinopec (600028), CITIC Securities (600030), Ping An (601318):
+- one home-appliance issuer, one petrochemical issuer, one securities issuer, one insurance issuer:
   file-level rejection due to insufficient extraction coverage.
 - Beijing Stock Exchange directory names use legacy codes while file names use
   new ones; code resolution is unified on file names.

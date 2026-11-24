@@ -88,10 +88,10 @@ This is **not** "please ask us to support more document types".
 
 ## 5. Known issues (no need to report again)
 
-- Vanke (000002) operating cash flow: our value +5.86bn vs. the reference -0.99bn;
+- one large-cap issuer operating cash flow: our value +5.86bn vs. the reference -0.99bn;
   the sign is wrong and internal evidence did not catch it. On the fix list.
-- Gree (000651): statements not located, file-level rejection.
-- Sinopec (600028), CITIC Securities (600030), Ping An (601318): file-level
+- one home-appliance issuer: statements not located, file-level rejection.
+- one petrochemical issuer, one securities issuer, one insurance issuer: file-level
   rejection for insufficient coverage.
 
 ---
