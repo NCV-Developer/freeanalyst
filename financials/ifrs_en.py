@@ -86,15 +86,15 @@ def _row_value(row, idx: int) -> float | None:
     return None
 
 
-def extract_pdf(doc) -> dict[str, float]:
+def extract_pdf(doc, item_map=None, titles=None) -> dict[str, float]:
     """从 PDF 里取（**按表格行 + 列角色**，不是"标签后第一个数字"）。
 
-    实测（9R Limited / CRCT 真实年报）：按文本行取会把**页码和附注号**当金额 ——
-    货币资金取出 31、存货取出 16、资产总计取出 24。所以必须走
-    `from_pdf.page_rows()` 的表格行，并用 `ingest.columns` 判哪一列是本期。
+    `item_map` 默认 IFRS 英文（`tw.ITEM_MAP`），港股传 `hk.ITEM_MAP_HK`。
+    `titles` 是主表标题关键词，用于限定只在主表页取值。
     """
     from ingest import columns as _cols
     from . import from_pdf as _fp
+    item_map = item_map or ITEM_MAP
 
     out: dict[str, float] = {}
     # **只在主表页取值。** 9R 实测：全文档「首次出现优先」会取到 MD&A 与附注里的
@@ -103,7 +103,16 @@ def extract_pdf(doc) -> dict[str, float]:
     main_pages: set[int] = set()
     for pg in doc.pages:
         t = (pg.raw_text or "").upper()
-        if any(k in t for k in (
+        # **「財務概要 / 財務摘要 / Financial Highlights」不算主表** ——
+        # 腾讯年报第 4 页就是五年概览，排在正表前面，
+        # 不排掉会把旧年份的数当成本期（实测资产/负债/收入全被带偏）。
+        if any(k in t for k in ("財務概要", "財務摘要", "FINANCIAL SUMMARY", "FINANCIAL HIGHLIGHTS")):
+            continue
+        if titles:
+            if any(k in t for k in titles):
+                main_pages.add(pg.number)
+                main_pages.add(pg.number + 1)
+        elif any(k in t for k in (
                 "STATEMENT OF FINANCIAL POSITION", "STATEMENTS OF FINANCIAL POSITION",
                 "PROFIT OR LOSS", "INCOME STATEMENT", "BALANCE SHEET",
                 "STATEMENT OF CASH FLOWS", "STATEMENTS OF CASH FLOWS",
@@ -123,7 +132,7 @@ def extract_pdf(doc) -> dict[str, float]:
             if not row:
                 continue
             label = str(row[0])
-            for item, (pat, excl) in ITEM_MAP.items():
+            for item, (pat, excl) in item_map.items():
                 if item in out:
                     continue
                 if not re.search(pat, label, re.IGNORECASE):

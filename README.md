@@ -53,6 +53,26 @@ Taiwan cash flow statements use the **indirect method**, so "cash received from
 sales" and "cash paid for goods" do not exist there — those two items are marked
 **not applicable**, not failures. The same applies to HK/US/SG filings.
 
+## Hong Kong — traditional-Chinese annual reports
+
+Verified against Tencent (00700) FY2025: **15/16 applicable items**, with
+articulation intact (current assets 595,460 + non-current 1,443,526 = total
+assets 2,038,986; revenue 751,766; net profit 229,801; cash equals closing cash).
+
+Two HK-specific behaviours are handled:
+
+- **Subtotal and revenue-total rows often have no label at all** (the parser sees
+  `〔此行没有标签〕`), so they are located by position: revenue is the row above
+  cost of sales, and subtotals are the last unlabelled row of each section.
+- **Five-year financial-summary pages are excluded** from statement detection, or
+  older years get picked up as the current period.
+
+HK issuers also filing with the SEC (e.g. Alibaba 09988/BABA) go through the
+20-F + official XBRL route instead (14/16 with official values).
+
+Xiaomi (01810) is a different problem: its text layer is `(cid:xxxx)` encoded
+(font subset with no Unicode map), so it needs OCR, not the table parser.
+
 ## United States (SEC EDGAR) — 16/16 via official XBRL
 
 ```bash
@@ -92,9 +112,9 @@ run `appraise` on it.
 
 - Scanned / image-only PDFs (OCR path not yet reliable)
 - Financial institutions: banks, insurers, brokers (different chart of accounts)
-- Hong Kong filings (financial-sector account groups and sample size insufficient)
 - English-language annual reports (statement location usually fails)
 - T-shaped two-column layouts, encrypted PDFs
+- PDFs whose text layer is `(cid:xxxx)` encoded (e.g. Xiaomi 01810) — needs OCR
 
 **A file-level rejection also fires when fewer than half of the 18 key items can
 be extracted** — the tool does not need to recognise *why* a document is hard in
