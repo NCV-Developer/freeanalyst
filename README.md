@@ -53,6 +53,23 @@ Taiwan cash flow statements use the **indirect method**, so "cash received from
 sales" and "cash paid for goods" do not exist there — those two items are marked
 **not applicable**, not failures. The same applies to HK/US/SG filings.
 
+## United States (SEC EDGAR) — 16/16 via official XBRL
+
+```bash
+.venv/bin/python freeanalyst.py fetch AAPL --market us --kind 10-K --period 2025
+```
+
+Two independent pieces, both verified:
+
+- **Download**: SEC EDGAR 10-K/10-Q retrieval. (Fixed a bug where ticker
+  resolution returned identities without a CIK, producing `CIK0000000000.json`
+  404s; the CIK is now looked up from the SEC ticker table when missing.)
+- **Extraction**: values come from the SEC's **official XBRL `companyconcept`
+  endpoint**, not from parsing HTML. Apple FY2025: **16/16 items** — revenue
+  $416,161M, net income $112,010M, total assets $359,241M, cash $35,934M.
+
+The same official data doubles as an independent source for reconciliation.
+
 ## Singapore (SGX) — validated on real filings
 
 Verified against real SGX annual reports supplied by a user:
@@ -75,7 +92,6 @@ run `appraise` on it.
 
 - Scanned / image-only PDFs (OCR path not yet reliable)
 - Financial institutions: banks, insurers, brokers (different chart of accounts)
-- US 10-K filings (HTML loader not built)
 - Hong Kong filings (financial-sector account groups and sample size insufficient)
 - English-language annual reports (statement location usually fails)
 - T-shaped two-column layouts, encrypted PDFs

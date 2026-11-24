@@ -801,7 +801,17 @@ def find(query: str, market: str = "", kind: str = "annual",
                 got = find_hk(ident.code, kind, period, filed, limit)
             else:
                 form = kind if kind.upper() == kind else "10-K 20-F 40-F 10-Q"
-                got = find_us(ident.key, form, period, filed, limit)
+                key = ident.key
+                if not key:
+                    # ⚠️ 东财 suggest 返回的美股身份**没有 SEC 的 CIK**（key 为空），
+                    # 直接拿去拼就是 `CIK0000000000.json` → 404（2026-11-22 实测）。
+                    # 缺 CIK 时用 ticker 回查 SEC 全量代码表补上。
+                    try:
+                        key = resolve_us_cik(ident.code)
+                    except LookupError as exc:
+                        r.fail(FailReason.MISSING_ID, str(exc))
+                        continue
+                got = find_us(key, form, period, filed, limit)
         except LookupError as exc:
             r.fail(FailReason.MISSING_ID, str(exc))
             continue

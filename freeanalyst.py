@@ -623,6 +623,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print(f"\n存到 {out}")
         for line in filings.render_sources(out):
             print(line)
+        if args.market == "us":
+            # 顺手把 SEC 官方 XBRL 的科目值也打出来 —— 比解析 HTML 可靠。
+            from datasources import sec_xbrl
+            try:
+                cik = filings.resolve_us_cik(args.query)
+                year = int(args.period) if args.period else 2025
+                vals = sec_xbrl.annual_values(cik, year)
+                print(f"\nSEC 官方 XBRL（FY{year}，美元）：取到 {len(vals)}/16")
+                for k, v in vals.items():
+                    print(f"  {k:<16}{v:>22,.0f}")
+            except Exception as exc:                   # noqa: BLE001
+                print(f"⚠ XBRL 取数失败：{exc}")
     return 0 if got else 1
 
 
