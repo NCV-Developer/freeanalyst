@@ -38,6 +38,21 @@ For private documents there is no external source to reconcile against, so the
 tool commits to only 40% of the fields and hands the remaining 60% back to you as
 low-confidence or rejected. **That is the design, not a malfunction.**
 
+## Taiwan listed companies (via MOPS)
+
+```bash
+.venv/bin/python freeanalyst.py fetch 2330 --market tw --period 2025
+```
+
+Taiwan filings come from **MOPS (Market Observation Post System)** as structured
+HTML with **bilingual Chinese/English standard captions**, so account mapping is a
+lookup rather than a guess. **16/16 applicable items** extracted for TSMC (2330)
+and MediaTek (2454); values are in NT$ thousands.
+
+Taiwan cash flow statements use the **indirect method**, so "cash received from
+sales" and "cash paid for goods" do not exist there — those two items are marked
+**not applicable**, not failures. The same applies to HK/US/SG filings.
+
 ## What it refuses to parse (file-level rejection, with a reason)
 
 - Scanned / image-only PDFs (OCR path not yet reliable)

@@ -558,6 +558,25 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     from datasources import filings
     from pathlib import Path
 
+    if args.market == "tw":
+        # 台湾走 MOPS 官方结构化财报，不是 PDF —— 每个科目带中英双语标准名。
+        from datasources import mops
+        year = int(args.period) if args.period else 2025
+        try:
+            path = mops.fetch(args.query, year, out_dir=args.out or "materials/tw")
+        except Exception as exc:                       # noqa: BLE001
+            print(f"✗ 台湾 MOPS 下载失败：{exc}")
+            return 1
+        from financials import tw as _tw
+        from ingest.html import extract_html
+        vals = _tw.extract(extract_html(path))
+        print(f"✓ {path}")
+        print(f"  取到 {len(vals)}/16 个适用科目（单位：新台币千元；"
+              "「销售商品/购买商品收付现」在间接法报表里不适用）")
+        for k, v in vals.items():
+            print(f"    {k:<16}{v:>22,.0f}")
+        return 0
+
     filed = None
     if args.filed:
         if ":" in args.filed:
@@ -639,7 +658,7 @@ def main() -> int:
 
     p_fetch = sub.add_parser("fetch", help="按公司名称或代码下载指定时间段的财报")
     p_fetch.add_argument("query", help="公司名称或股票代码：某白酒公司 / 600519 / 建設銀行 / AAPL")
-    p_fetch.add_argument("--market", choices=["cn", "us", "hk"], default="",
+    p_fetch.add_argument("--market", choices=["cn", "us", "hk", "tw"], default="",
                          help="市场（默认按代码形态或名称自动判）")
     p_fetch.add_argument("--kind", default="annual",
                          help="annual/interim/quarterly；美股可给 10-K 或 \"10-K 20-F\"")
