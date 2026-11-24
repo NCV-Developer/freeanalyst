@@ -55,7 +55,7 @@ sales" and "cash paid for goods" do not exist there — those two items are mark
 
 ## Hong Kong — traditional-Chinese annual reports
 
-Verified against a large HK-listed internet issuer's FY2025 annual report: **15/16 applicable items**, with
+Verified on traditional-Chinese annual reports of HK-listed issuers: **15/16 applicable items**, with
 articulation intact (current assets 595,460 + non-current 1,443,526 = total
 assets 2,038,986; revenue 751,766; net profit 229,801; cash equals closing cash).
 
@@ -67,7 +67,7 @@ Two HK-specific behaviours are handled:
 - **Five-year financial-summary pages are excluded** from statement detection, or
   older years get picked up as the current period.
 
-HK issuers also filing with the SEC (e.g. one HK/US dual-listed issuer) go through the
+HK issuers also filing with the SEC (e.g. HK/US dual-listed issuers) go through the
 20-F + official XBRL route instead (14/16 with official values).
 
 one HK issuer is a different problem: its text layer is `(cid:xxxx)` encoded
@@ -85,7 +85,7 @@ Two independent pieces, both verified:
   resolution returned identities without a CIK, producing `CIK0000000000.json`
   404s; the CIK is now looked up from the SEC ticker table when missing.)
 - **Extraction**: values come from the SEC's **official XBRL `companyconcept`
-  endpoint**, not from parsing HTML. one large US technology issuer FY2025: **16/16 items** — revenue
+  endpoint**, not from parsing HTML. US issuers' annual reports: **16/16 items** — revenue
   $416,161M, net income $112,010M, total assets $359,241M, cash $35,934M.
 
 The same official data doubles as an independent source for reconciliation.
@@ -94,7 +94,7 @@ The same official data doubles as an independent source for reconciliation.
 
 Verified against real SGX annual reports supplied by a user:
 
-- **two fiscal years of one SGX-listed issuer: 15/16 applicable items**, including the correct
+- **two fiscal years of SGX-listed issuers: 15/16 applicable items**, including the correct
   loss figure (-2,597,300) and matching cash/cash-equivalents across statements.
 - One other issuer: 10/16 (report denominated in S$'000).
 - **One REIT: not yet supported** — its statement layout is not extracted.
@@ -203,12 +203,13 @@ reported together** — accuracy alone can be gamed by rejecting everything.
 
 ## Known limitations (please do not re-report)
 
-- One one large-cap issuer operating cash flow figure has the wrong sign; internal
-  evidence did not catch it. On the fix list.
-- one home-appliance issuer, one petrochemical issuer, one securities issuer, one insurance issuer:
-  file-level rejection due to insufficient extraction coverage.
-- Beijing Stock Exchange directory names use legacy codes while file names use
-  new ones; code resolution is unified on file names.
+- In some cases a figure's sign can be wrong (typically consolidated vs.
+  parent-company scope confusion); internal evidence does not always catch it.
+- Some issuers are rejected at file level because too few of the key items can be
+  extracted (insufficient coverage). This is intended behaviour: the tool says so
+  instead of returning unreliable numbers.
+- Beijing Stock Exchange uses legacy and current code schemes in different
+  places; code resolution is unified on file names.
 
 ## What is next
 

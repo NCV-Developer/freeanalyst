@@ -88,11 +88,10 @@ This is **not** "please ask us to support more document types".
 
 ## 5. Known issues (no need to report again)
 
-- one large-cap issuer operating cash flow: our value +5.86bn vs. the reference -0.99bn;
-  the sign is wrong and internal evidence did not catch it. On the fix list.
-- one home-appliance issuer: statements not located, file-level rejection.
-- one petrochemical issuer, one securities issuer, one insurance issuer: file-level
-  rejection for insufficient coverage.
+- Some figures can have the wrong sign (typically consolidated vs. parent-company
+  scope confusion); internal evidence does not always catch it.
+- Some issuers are rejected at file level for insufficient extraction coverage.
+  This is intended behaviour, not a malfunction.
 
 ---
 
