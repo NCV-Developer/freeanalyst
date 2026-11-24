@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 #: 使用者看得到的文件
 USER_FACING = ("webapp_page.html", "webapp_doc.html", "webapp_config.html",
-               "README.md", "CHANGELOG.md")
+               "README.md", "README.zh-CN.md", "CHANGELOG.md")
 
 #: 这份测试自己（和它的姊妹测试）要**引述**这条规矩，所以它们里出现「零出境」
 #: 是在说"不许这么写"，不是自己写错。除了它们，**全仓库都不许出现**。
@@ -99,7 +99,8 @@ class TestPreciseWording(unittest.TestCase):
             self.assertIn(token, doc, token)
 
     def test_readme_explains_the_term(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8") + "\n" + \
+            (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")   # 中英文都要算
         self.assertIn("机密材料不出本机", readme)
         # 换词的理由要写出来，不然下一个人又改回去
         self.assertIn("跨境传输", readme)

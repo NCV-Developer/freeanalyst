@@ -78,7 +78,8 @@ class TestStartScripts(unittest.TestCase):
 
     def test_readme_tells_both_paths(self):
         """README 与脚本体不能各说各话 —— 主路是 clone，双击是补充。"""
-        text = README.read_text(encoding="utf-8")
+        text = README.read_text(encoding="utf-8") + "\n" + \
+            (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")   # 中英文都要算
         self.assertIn("git clone", text)
         self.assertIn("start.command", text)
         self.assertIn("start-windows.bat", text)
